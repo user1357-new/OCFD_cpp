@@ -16,8 +16,8 @@ int main(int argc, char **argv)
     PetscInt ny_global = 101;   // 改成你的实际值
     PetscInt nz_global = 16;    // 2D平面，Z方向为1
     
-    PetscInt npx0 = 1;
-    PetscInt npy0 = 1;
+    PetscInt npx0 = 2;
+    PetscInt npy0 = 2;
     PetscInt npz0 = 1;
     
     PetscInt scheme_vis = OCFD_Scheme_CD6;
