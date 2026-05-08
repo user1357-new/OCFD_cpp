@@ -8,15 +8,17 @@
 #include <vector>
 #include <string> 
 
-// 构造函数
+//构造函数
 Mesh::Mesh(PetscInt nx_g, PetscInt ny_g, PetscInt nz_g,
            PetscInt my_id_, 
            PetscInt npx0_, PetscInt npy0_, PetscInt npz0_,
-           PetscInt lap, PetscInt grid_type, PetscInt scheme_vis)
+           PetscInt lap, PetscInt grid_type, PetscInt scheme_vis,
+           MPI_Comm comm_)
     : nx_global(nx_g), ny_global(ny_g), nz_global(nz_g),
       my_id(my_id_), 
       npx0(npx0_), npy0(npy0_), npz0(npz0_),
       LAP(lap), Iflag_Gridtype(grid_type), Scheme_Vis(scheme_vis),
+      comm(comm_),                  
       da(nullptr),
       Axx(nullptr), Ayy(nullptr), Azz(nullptr),
       Akx(nullptr), Aky(nullptr), Akz(nullptr),
@@ -28,8 +30,6 @@ Mesh::Mesh(PetscInt nx_g, PetscInt ny_g, PetscInt nz_g,
       Asx1(nullptr), Asy1(nullptr), Asz1(nullptr),
       boundary_condition_handler(nullptr)
 {
-    // 删除了 i_offset, j_offset, k_offset 的手动分配和计算
-    // 因为我们将直接使用 PETSc 提供的 info.xs/ys/zs 作为全局索引
 }
 
 // 析构函数
@@ -192,5 +192,61 @@ PetscErrorCode Mesh::RestoreLocalArrays(
     ierr = DMDAVecRestoreArray(da, Asz1, &Asz1_arr);
     CHKERRQ(ierr);
     
+    return 0;
+}
+// 初始化网格
+PetscErrorCode Mesh::InitializeFromCoordinates(
+    const std::vector<PetscReal> &x_global,
+    const std::vector<PetscReal> &y_global,
+    const std::vector<PetscReal> &z_global)
+{
+    PetscErrorCode ierr;
+
+    // 1. 创建 DMDA（使用子通信域 comm）
+    ierr = DMDACreate3d(comm,
+                        DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,
+                        DMDA_STENCIL_BOX,
+                        nx_global, ny_global, nz_global,
+                        npx0, npy0, npz0,
+                        1, LAP,
+                        NULL, NULL, NULL,
+                        &da); CHKERRQ(ierr);
+    ierr = DMSetUp(da); CHKERRQ(ierr);
+
+    // 2. 创建坐标向量
+    ierr = DMCreateGlobalVector(da, &Axx); CHKERRQ(ierr);
+    ierr = VecDuplicate(Axx, &Ayy); CHKERRQ(ierr);
+    ierr = VecDuplicate(Axx, &Azz); CHKERRQ(ierr);
+
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+    nx = info.xm; ny = info.ym; nz = info.zm;
+
+    PetscReal ***axx, ***ayy, ***azz;
+    ierr = DMDAVecGetArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz, &azz); CHKERRQ(ierr);
+
+    // 3. 填充局部坐标（全局索引：info.xs/ys/zs + 偏移）
+    for (PetscInt k = info.zs; k < info.zs + info.zm; k++) {
+        for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
+            for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
+                PetscInt idx = (k * ny_global + j) * nx_global + i;
+                axx[k][j][i] = x_global[idx];
+                ayy[k][j][i] = y_global[idx];
+                azz[k][j][i] = z_global[idx];
+            }
+        }
+    }
+
+    ierr = DMDAVecRestoreArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz, &azz); CHKERRQ(ierr);
+    //计算jacobi
+    ierr = comput_Jacobian3d(); CHKERRQ(ierr);
+
+    ierr = Jac_Ghost_boundary(); CHKERRQ(ierr);
+
+    PetscPrintf(comm, "Initial Mesh OK (from coordinates)\n");
     return 0;
 }

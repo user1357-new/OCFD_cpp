@@ -7,499 +7,298 @@
 #include <mpi.h>
 #include <vector>
 #include <string>
-// 公开初始化接口
-PetscErrorCode Mesh::Initialize()
-{
-    return init_mesh();
-} 
- // 初始化网格
-PetscErrorCode Mesh::init_mesh()
-{
-    PetscErrorCode ierr;
-    
-    // Step 1: 根据网格类型读取网格
-    if (Iflag_Gridtype == GRID1D) {
-        ierr = read_mesh1d();
-        CHKERRQ(ierr);
-    } else if (Iflag_Gridtype == GRID2D_PLANE) {
-        ierr = read_mesh2d_plane();
-        CHKERRQ(ierr);
-    } else if (Iflag_Gridtype == GRID2D_AXIAL_SYMM) {
-        ierr = read_mesh2d_AxialSymm();
-        CHKERRQ(ierr);
-    } else if (Iflag_Gridtype == GRID3D || Iflag_Gridtype == GRID_AND_JACOBIAN3D) {
-        ierr = read_mesh3d();
-        CHKERRQ(ierr);
+#include "mesh_mutiblock.h"
+#include <sstream>
+#include <algorithm>
+#include <cctype>
+#include <petsc.h>
+#include <stdexcept>
+#include <memory>
+//找到 "T=" 跳过空格和等号，读取引号内内容
+std::string MultiBlockMesh::extract_string(const std::string &line, const std::string &key) {
+    size_t pos = line.find(key);
+    if (pos == std::string::npos) return "";
+    pos += key.size();
+    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '=')) pos++;
+    if (pos >= line.size()) return "";
+    if (line[pos] == '\"') {
+        size_t end = line.find('\"', pos+1);
+        if (end != std::string::npos)
+            return line.substr(pos+1, end-pos-1);
+        else
+            return line.substr(pos+1);
+    } else {
+        std::istringstream iss(line.substr(pos));
+        std::string token;
+        iss >> token;
+        return token;
     }
-    
-    // Step 2: 交换边界数据（MPI部分，留空给您实现）
-    exchange_boundary_xyz(Axx);
-    exchange_boundary_xyz(Ayy);
-    exchange_boundary_xyz(Azz);
-    
-    // Step 3: 调用用户注册的边界条件处理函数（包括周期性边界等）
-    if (boundary_condition_handler) {
-        boundary_condition_handler();
-    }
-    
-    // Step 4: 如果不是预计算的雅可比，则计算
-    if (Iflag_Gridtype != GRID_AND_JACOBIAN3D) {
-        ierr = comput_Jacobian3d();
-        CHKERRQ(ierr);
-    }
-    
-    // Step 5: 交换雅可比系数边界（MPI部分，留空给您实现）
-    exchange_boundary_xyz(Akx);
-    exchange_boundary_xyz(Aky);
-    exchange_boundary_xyz(Akz);
-    exchange_boundary_xyz(Aix);
-    exchange_boundary_xyz(Aiy);
-    exchange_boundary_xyz(Aiz);
-    exchange_boundary_xyz(Asx);
-    exchange_boundary_xyz(Asy);
-    exchange_boundary_xyz(Asz);
-    exchange_boundary_xyz(Ajac);
-    
-    // Step 6: Ghost Cell边界处理（MPI部分，留空给您实现）
-    ierr = Jac_Ghost_boundary();
-    CHKERRQ(ierr);
-    
-    if (my_id == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "Initial Mesh OK\n");
-    }
-    
-    return 0;
 }
-// 读取1D网格（对应原read_mesh1d）
-PetscErrorCode Mesh::read_mesh1d()
-{
-    PetscErrorCode ierr;
-    PetscMPIInt rank;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    
-    // 分配临时数组存储全局网格
-    PetscReal *x0 = new PetscReal[nx_global];
-    PetscReal *y0 = new PetscReal[ny_global];
-    PetscReal *z0 = new PetscReal[nz_global];
-    
-    // 进程0读取文件
-    if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "read 1D mesh ...\n");
-        
-        std::ifstream file("OCFD-grid.dat", std::ios::binary | std::ios::in);
-        if (!file.is_open()) {
-            SETERRQ(PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN,
-                    "Cannot open OCFD-grid.dat");
-        }
-        
-        file.read(reinterpret_cast<char*>(x0), nx_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(y0), ny_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(z0), nz_global * sizeof(PetscReal));
-        
-        file.close();
+//找到 "I=/J=/K=" 跳过等号，读取后面内容
+PetscInt MultiBlockMesh::extract_int(const std::string &line, const std::string &key) {
+    size_t pos = line.find(key);
+    if (pos == std::string::npos) return 0;
+    pos += key.size();
+    while (pos < line.size() && line[pos] == ' ') pos++;
+    std::string num;
+    while (pos < line.size() && std::isdigit(line[pos])) {
+        num += line[pos++];
     }
-    
-    // 广播到所有进程
-    MPI_Bcast(x0, nx_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(y0, ny_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(z0, nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    
-    // 创建DMDA：使用您规定的 npx0, npy0, npz0 进行分块
-    ierr = DMDACreate3d(PETSC_COMM_WORLD,
-                        DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,
-                        DMDA_STENCIL_BOX,
-                        nx_global, ny_global, nz_global,
-                        npx0, npy0, npz0,  // ← 这里使用了您规定的参数
-                        1, LAP,
-                        NULL, NULL, NULL,
-                        &da);
-    CHKERRQ(ierr);
-    
-    ierr = DMSetUp(da);
-    CHKERRQ(ierr);
-    
-    // 创建坐标向量
-    ierr = DMCreateGlobalVector(da, &Axx);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Ayy);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Azz);
-    CHKERRQ(ierr);
-    
-    // 获取局部信息
-    DMDALocalInfo info;
-    ierr = DMDAGetLocalInfo(da, &info);
-    CHKERRQ(ierr);
-    
-    nx = info.xm; ny = info.ym; nz = info.zm;
-    
-    PetscReal ***axx, ***ayy, ***azz;
-    ierr = DMDAVecGetArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    // 简化逻辑：直接使用 info.xs/ys/zs 作为全局索引访问 x0/y0/z0
-    for (PetscInt k = info.zs; k < info.zs + info.zm; k++) {
-        for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
-            for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
-                axx[k][j][i] = x0[i];
-                ayy[k][j][i] = y0[j];
-                azz[k][j][i] = z0[k];
+    return num.empty() ? 0 : std::stoi(num);
+}
+//读取数据，每个zone为一个块
+void MultiBlockMesh::ParseTecplotFile(const std::string &filename,
+                                      std::vector<BlockInfo> &infos) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open multi-block file: " + filename);
+    }
+
+    std::string line;
+    BlockInfo cur;
+    bool in_data = false;      // 正在读数据
+    bool need_ijk = false;     // 正在等尺寸行
+    int total = 0, count = 0;
+
+    while (std::getline(file, line)) {
+        // 去首尾空格
+        size_t s = line.find_first_not_of(" \t\r\n");
+        if (s == std::string::npos) continue;
+        size_t e = line.find_last_not_of(" \t\r\n");
+        line = line.substr(s, e - s + 1);
+
+        if (line.empty() || line[0] == '#') continue;
+
+        std::string upper = line;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+
+        // 跳过全局头行
+        if (upper.find("TITLE") == 0 ||
+            upper.find("VARIABLES") == 0 ||
+            upper.find("DATASETAUXDATA") == 0 ||
+            upper.find("DT=") != std::string::npos) {
+            continue;
+        }
+
+        // 如果正在等尺寸
+        if (need_ijk) {
+            if (upper.find("I=") != std::string::npos &&
+                upper.find("J=") != std::string::npos) {
+                cur.ni = extract_int(line, "I=");
+                cur.nj = extract_int(line, "J=");
+                cur.nk = extract_int(line, "K=");
+                if (cur.ni > 0 && cur.nj > 0 && cur.nk > 0) {
+                    total = cur.ni * cur.nj * cur.nk;
+                    cur.x.reserve(total);
+                    cur.y.reserve(total);
+                    cur.z.reserve(total);
+                    need_ijk = false;
+                    in_data = true;
+                    count = 0;
+                }
+            }
+            continue;
+        }
+
+        // 发现新块：ZONE T=
+        if (upper.find("ZONE T=") != std::string::npos) {
+            // 先把上一个块入库
+            if (in_data && count == total) {
+                infos.push_back(cur);
+            }
+            cur = BlockInfo();
+            cur.name = extract_string(line, "T=");
+            // 尝试从本行直接拿尺寸
+            cur.ni = extract_int(line, "I=");
+            cur.nj = extract_int(line, "J=");
+            cur.nk = extract_int(line, "K=");
+            if (cur.ni > 0 && cur.nj > 0 && cur.nk > 0) {
+                total = cur.ni * cur.nj * cur.nk;
+                cur.x.reserve(total);
+                cur.y.reserve(total);
+                cur.z.reserve(total);
+                in_data = true;
+                count = 0;
+            } else {
+                // 尺寸不在本行，等下一行
+                need_ijk = true;
+                in_data = false;
+            }
+            continue;
+        }
+
+        // 读数据
+        if (in_data) {
+            std::istringstream iss(line);
+            double x, y, z;
+            if (iss >> x >> y >> z) {
+                cur.x.push_back(x);
+                cur.y.push_back(y);
+                cur.z.push_back(z);
+                count++;
+                if (count == total) {
+                    infos.push_back(cur);
+                    in_data = false;
+                }
             }
         }
     }
-    
-    ierr = DMDAVecRestoreArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    delete[] x0;
-    delete[] y0;
-    delete[] z0;
-    
-    return 0;
-}
 
-// 读取2D平面网格
-PetscErrorCode Mesh::read_mesh2d_plane()
-{
-    PetscErrorCode ierr;
-    PetscMPIInt rank;
+    // 最后一组数据可能没关闭
+    if (in_data && count == total) {
+        infos.push_back(cur);
+    }
+}
+// 构造函数：初始化成员变量
+MultiBlockMesh::MultiBlockMesh(const std::vector<std::array<PetscInt,3>> &procs,
+                               PetscInt lap, PetscInt scheme_vis)
+    : block_procs_(procs), LAP(lap), scheme_vis(scheme_vis)
+{}
+// 析构函数：释放所有子通信域
+MultiBlockMesh::~MultiBlockMesh() {
+    for (auto &comm : block_comms_) {
+        if (comm != MPI_COMM_NULL && comm != PETSC_COMM_WORLD) {
+            MPI_Comm_free(&comm);
+        }
+    }
+}
+// Initialize 核心逻辑
+void MultiBlockMesh::Initialize(const std::string &tecplot_filename) {
+    PetscMPIInt rank, size;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    
-    PetscReal *x2 = new PetscReal[nx_global * ny_global];
-    PetscReal *y2 = new PetscReal[nx_global * ny_global];
-    PetscReal *z1 = new PetscReal[nz_global];
-    
+    MPI_Comm_size(PETSC_COMM_WORLD, &size);
+
+    // ---------- 1. 解析 Tecplot 文件（仅 rank 0）----------
+    std::vector<BlockInfo> infos;
     if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "read 2D plane mesh ...\n");
-        
-        std::ifstream file("OCFD-grid.dat", std::ios::binary | std::ios::in);
-        if (!file.is_open()) {
-            SETERRQ(PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN,
-                    "Cannot open OCFD-grid.dat");
+        try {
+            ParseTecplotFile(tecplot_filename, infos);
+        } catch (const std::exception &e) {
+            PetscPrintf(PETSC_COMM_WORLD, "Error parsing file: %s\n", e.what());
+            MPI_Abort(PETSC_COMM_WORLD, 1);
         }
-        
-        // 跳过 Fortran unformatted 记录标记（每个记录前后有4字节长度）
-        int record_len;
-        
-        // 读取 x2d
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        file.read(reinterpret_cast<char*>(x2), nx_global * ny_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        
-        // 读取 y2d
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        file.read(reinterpret_cast<char*>(y2), nx_global * ny_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        
-        // 读取 z1d
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        file.read(reinterpret_cast<char*>(z1), nz_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(&record_len), 4);
-        
-        file.close();
     }
-    
-    MPI_Bcast(x2, nx_global * ny_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(y2, nx_global * ny_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(z1, nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    
-    ierr = DMDACreate3d(PETSC_COMM_WORLD,
-                        DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,
-                        DMDA_STENCIL_BOX,
-                        nx_global, ny_global, nz_global,
-                        npx0, npy0, npz0, // 使用规定分块
-                        1, LAP,
-                        NULL, NULL, NULL,
-                        &da);
-    CHKERRQ(ierr);
-    
-    ierr = DMSetUp(da);
-    CHKERRQ(ierr);
-    
 
-    ierr = DMCreateGlobalVector(da, &Axx);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Ayy);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Azz);
-    CHKERRQ(ierr);
-    
-    DMDALocalInfo info;
-    ierr = DMDAGetLocalInfo(da, &info);
-    CHKERRQ(ierr);
-    
-    nx = info.xm; ny = info.ym; nz = info.zm;
-    
+    // 广播块数
+    PetscInt num_blocks = static_cast<PetscInt>(infos.size());
+    MPI_Bcast(&num_blocks, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
 
-    nx = info.xm; ny = info.ym; nz = info.zm;
-    
-    PetscPrintf(PETSC_COMM_WORLD, "Rank %d: xs=%d, xm=%d, ys=%d, ym=%d, zs=%d, zm=%d\n", 
-                rank, info.xs, info.xm, info.ys, info.ym, info.zs, info.zm);
-    
+    // 检查进程布局与块数是否一致
+    if (static_cast<PetscInt>(block_procs_.size()) != num_blocks) {
+        throw std::runtime_error("Block process layout size does not match number of blocks in file");
+    }
 
+    // ---------- 2. 校验总进程需求 ----------
+    std::vector<PetscInt> block_nprocs(num_blocks);
+    PetscInt total_needed = 0;
+    for (PetscInt b = 0; b < num_blocks; ++b) {
+        block_nprocs[b] = block_procs_[b][0] * block_procs_[b][1] * block_procs_[b][2];
+        total_needed += block_nprocs[b];
+    }
+    if (total_needed != size) {
+        throw std::runtime_error("Total required processes (" + std::to_string(total_needed) +
+                                 ") != available (" + std::to_string(size) + ")");
+    }
 
+    // ---------- 3. 确定本进程所属块、计算每个块起始 rank ----------
+    PetscInt my_block = -1;
+    PetscInt offset = 0;
+    std::vector<PetscInt> block_start_rank(num_blocks);
+    for (PetscInt b = 0; b < num_blocks; ++b) {
+        block_start_rank[b] = offset;
+        if (rank >= offset && rank < offset + block_nprocs[b]) {
+            my_block = b;
+        }
+        offset += block_nprocs[b];
+    }
 
-    PetscReal ***axx, ***ayy, ***azz;
-    ierr = DMDAVecGetArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    for (PetscInt k = info.zs; k < info.zs + info.zm; k++) {
-        for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
-            for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
-                
-                PetscInt idx = j * nx_global + i;
-                axx[k][j][i] = x2[idx];
-                ayy[k][j][i] = y2[idx];
-                azz[k][j][i] = z1[k];
-             
+    // ---------- 4. 创建子通信域 ----------
+    block_comms_.resize(num_blocks, MPI_COMM_NULL);
+    MPI_Comm split_comm;
+    MPI_Comm_split(PETSC_COMM_WORLD, my_block, rank - block_start_rank[my_block], &split_comm);
+    block_comms_[my_block] = split_comm;
+
+    // ---------- 5. 广播每个块的尺寸 ----------
+    std::vector<PetscInt> dims(num_blocks * 3);
+    if (rank == 0) {
+        for (PetscInt i = 0; i < num_blocks; i++) {
+            dims[3*i]   = infos[i].ni;
+            dims[3*i+1] = infos[i].nj;
+            dims[3*i+2] = infos[i].nk;
+        }
+    }
+    MPI_Bcast(dims.data(), 3 * num_blocks, MPIU_INT, 0, PETSC_COMM_WORLD);
+
+    // ---------- 6. 全局 rank 0 预先发送坐标给各块的第一个进程 ----------
+    const int tag = 12345;
+    if (rank == 0) {
+        for (PetscInt b = 0; b < num_blocks; ++b) {
+            PetscInt npts = infos[b].ni * infos[b].nj * infos[b].nk;
+            if (block_start_rank[b] == 0) continue; // 自己就是该块第一个进程，无需发送
+            MPI_Send(infos[b].x.data(), npts, MPI_DOUBLE, block_start_rank[b], tag,   PETSC_COMM_WORLD);
+            MPI_Send(infos[b].y.data(), npts, MPI_DOUBLE, block_start_rank[b], tag+1, PETSC_COMM_WORLD);
+            MPI_Send(infos[b].z.data(), npts, MPI_DOUBLE, block_start_rank[b], tag+2, PETSC_COMM_WORLD);
+        }
+    }
+
+    // ---------- 7. 为每个块创建 Mesh ----------
+    blocks_.clear();
+    blocks_.reserve(num_blocks);
+
+    for (PetscInt b = 0; b < num_blocks; ++b) {
+        PetscInt ni = dims[3*b];
+        PetscInt nj = dims[3*b+1];
+        PetscInt nk = dims[3*b+2];
+        PetscInt npts = ni * nj * nk;
+
+        if (b == my_block) {
+            std::vector<PetscReal> x(npts), y(npts), z(npts);
+
+            // 块内 rank 0 获取完整坐标
+            if (rank == block_start_rank[b]) {
+                if (rank == 0) {
+                    x = infos[b].x;
+                    y = infos[b].y;
+                    z = infos[b].z;
+                } else {
+                    MPI_Recv(x.data(), npts, MPI_DOUBLE, 0, tag,   PETSC_COMM_WORLD, MPI_STATUS_IGNORE);
+                    MPI_Recv(y.data(), npts, MPI_DOUBLE, 0, tag+1, PETSC_COMM_WORLD, MPI_STATUS_IGNORE);
+                    MPI_Recv(z.data(), npts, MPI_DOUBLE, 0, tag+2, PETSC_COMM_WORLD, MPI_STATUS_IGNORE);
+                }
             }
+
+            // 在子通信域内广播坐标
+            MPI_Bcast(x.data(), npts, MPI_DOUBLE, 0, block_comms_[b]);
+            MPI_Bcast(y.data(), npts, MPI_DOUBLE, 0, block_comms_[b]);
+            MPI_Bcast(z.data(), npts, MPI_DOUBLE, 0, block_comms_[b]);
+
+            PetscInt my_rank_block;
+            MPI_Comm_rank(block_comms_[b], &my_rank_block);
+
+            auto mesh_ptr = std::make_unique<Mesh>(
+                ni, nj, nk,
+                my_rank_block,
+                block_procs_[b][0], block_procs_[b][1], block_procs_[b][2],
+                LAP, GRID3D, scheme_vis,
+                block_comms_[b]
+            );
+            mesh_ptr->InitializeFromCoordinates(x, y, z);
+            blocks_.push_back(std::move(mesh_ptr));
+        } else {
+            blocks_.push_back(nullptr);
         }
     }
-    
-    ierr = DMDAVecRestoreArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    delete[] x2;
-    delete[] y2;
-    delete[] z1;
-    
-    return 0;
+
+    MPI_Barrier(PETSC_COMM_WORLD);
 }
 
-// 读取2D轴对称网格
-PetscErrorCode Mesh::read_mesh2d_AxialSymm()
-{
-    PetscErrorCode ierr;
-    PetscMPIInt rank;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    
-    PetscReal *x2 = new PetscReal[nx_global * ny_global];
-    PetscReal *R2 = new PetscReal[nx_global * ny_global];
-    PetscReal *seta1 = new PetscReal[nz_global];
-    
-    if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "read 2D axial symm mesh ...\n");
-        
-        std::ifstream file("OCFD-grid.dat", std::ios::binary | std::ios::in);
-        if (!file.is_open()) {
-            SETERRQ(PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN,
-                    "Cannot open OCFD-grid.dat");
-        }
-        
-        file.read(reinterpret_cast<char*>(x2), 
-                  nx_global * ny_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(R2), 
-                  nx_global * ny_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(seta1), 
-                  nz_global * sizeof(PetscReal));
-        
-        file.close();
-    }
-    
-    MPI_Bcast(x2, nx_global * ny_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(R2, nx_global * ny_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(seta1, nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    
-    ierr = DMDACreate3d(PETSC_COMM_WORLD,
-                        DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,
-                        DMDA_STENCIL_BOX,
-                        nx_global, ny_global, nz_global,
-                        npx0, npy0, npz0, // 使用规定分块
-                        1, LAP,
-                        NULL, NULL, NULL,
-                        &da);
-    CHKERRQ(ierr);
-    
-    ierr = DMSetUp(da);
-    CHKERRQ(ierr);
-    
-    ierr = DMCreateGlobalVector(da, &Axx);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Ayy);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Azz);
-    CHKERRQ(ierr);
-    
-    DMDALocalInfo info;
-    ierr = DMDAGetLocalInfo(da, &info);
-    CHKERRQ(ierr);
-    
-    nx = info.xm; ny = info.ym; nz = info.zm;
-    
-    PetscReal ***axx, ***ayy, ***azz;
-    ierr = DMDAVecGetArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    for (PetscInt k = info.zs; k < info.zs + info.zm; k++) {
-        for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
-            for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
-                PetscInt idx = j * nx_global + i;
-                axx[k][j][i] = x2[idx];
-                ayy[k][j][i] = R2[idx] * std::cos(seta1[k]);
-                azz[k][j][i] = R2[idx] * std::sin(seta1[k]);
-            }
-        }
-    }
-    
-    ierr = DMDAVecRestoreArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    delete[] x2;
-    delete[] R2;
-    delete[] seta1;
-    
-    return 0;
-}
-
-// 读取3D网格
-PetscErrorCode Mesh::read_mesh3d()
-{
-    PetscErrorCode ierr;
-    PetscMPIInt rank;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    
-    // 分配临时数组存储全局网格
-    PetscReal *x3 = new PetscReal[nx_global * ny_global * nz_global];
-    PetscReal *y3 = new PetscReal[nx_global * ny_global * nz_global];
-    PetscReal *z3 = new PetscReal[nx_global * ny_global * nz_global];
-    
-    if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "read 3D mesh ...\n");
-        
-        std::ifstream file("OCFD-grid.dat", std::ios::binary | std::ios::in);
-        if (!file.is_open()) {
-            SETERRQ(PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN,
-                    "Cannot open OCFD-grid.dat");
-        }
-        
-        // 读取所有网格点的 x, y, z 坐标
-        file.read(reinterpret_cast<char*>(x3), 
-                  nx_global * ny_global * nz_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(y3), 
-                  nx_global * ny_global * nz_global * sizeof(PetscReal));
-        file.read(reinterpret_cast<char*>(z3), 
-                  nx_global * ny_global * nz_global * sizeof(PetscReal));
-        
-        file.close();
-    }
-    
-    // 广播到所有进程
-    MPI_Bcast(x3, nx_global * ny_global * nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(y3, nx_global * ny_global * nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    MPI_Bcast(z3, nx_global * ny_global * nz_global, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
-    
-    ierr = DMDACreate3d(PETSC_COMM_WORLD,
-                        DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,
-                        DMDA_STENCIL_BOX,
-                        nx_global, ny_global, nz_global,
-                        npx0, npy0, npz0,
-                        1, LAP,
-                        NULL, NULL, NULL,
-                        &da);
-    CHKERRQ(ierr);
-    
-    ierr = DMSetUp(da);
-    CHKERRQ(ierr);
-    
-    ierr = DMCreateGlobalVector(da, &Axx);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Ayy);
-    CHKERRQ(ierr);
-    ierr = VecDuplicate(Axx, &Azz);
-    CHKERRQ(ierr);
-    
-    DMDALocalInfo info;
-    ierr = DMDAGetLocalInfo(da, &info);
-    CHKERRQ(ierr);
-    
-    nx = info.xm; ny = info.ym; nz = info.zm;
-    
-    // 获取局部数组并填充网格坐标
-    PetscReal ***axx, ***ayy, ***azz;
-    ierr = DMDAVecGetArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecGetArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    // 使用全局索引填充当前进程的局部网格
-    for (PetscInt k = info.zs; k < info.zs + info.zm; k++) {
-        for (PetscInt j = info.ys; j < info.ys + info.ym; j++) {
-            for (PetscInt i = info.xs; i < info.xs + info.xm; i++) {
-                // 3D 网格的线性索引
-                PetscInt idx = k * nx_global * ny_global + j * nx_global + i;
-                axx[k][j][i] = x3[idx];
-                ayy[k][j][i] = y3[idx];
-                azz[k][j][i] = z3[idx];
-            }
-        }
-    }
-    
-    ierr = DMDAVecRestoreArray(da, Axx, &axx);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Ayy, &ayy);
-    CHKERRQ(ierr);
-    ierr = DMDAVecRestoreArray(da, Azz, &azz);
-    CHKERRQ(ierr);
-    
-    // 释放临时数组
-    delete[] x3;
-    delete[] y3;
-    delete[] z3;
-    
-    // 如果是预计算的雅可比类型，则创建雅可比向量（但不计算）
-    if (Iflag_Gridtype == GRID_AND_JACOBIAN3D) {
-        ierr = DMCreateGlobalVector(da, &Akx);
-        CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Aky); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Akz); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Aix); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Aiy); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Aiz); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Asx); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Asy); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Asz); CHKERRQ(ierr);
-        ierr = VecDuplicate(Akx, &Ajac); CHKERRQ(ierr);
-    }
-    
-    if (rank == 0) {
-        PetscPrintf(PETSC_COMM_WORLD, "read 3D mesh OK\n");
-    }
-    
-    return 0;
-}
 // 导出到 Tecplot(dat格式)
 PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
 {
     PetscErrorCode ierr;
     PetscMPIInt rank, size;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    MPI_Comm_size(PETSC_COMM_WORLD, &size);
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
 
     DMDALocalInfo info;
     PetscReal ***axx, ***ayy, ***azz;
@@ -560,12 +359,12 @@ PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
         Axx_recv.resize(global_size);
     }
 
-    MPI_Reduce(X_global.data(), X_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
-    MPI_Reduce(Y_global.data(), Y_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
-    MPI_Reduce(Z_global.data(), Z_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
-    MPI_Reduce(Akx_global.data(), Akx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
-    MPI_Reduce(Akx1_global.data(), Akx1_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
-    MPI_Reduce(Axx_global.data(), Axx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
+    MPI_Reduce(X_global.data(), X_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(Y_global.data(), Y_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(Z_global.data(), Z_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(Akx_global.data(), Akx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(Akx1_global.data(), Akx1_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(Axx_global.data(), Axx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
 
     // rank 0 按 Tecplot 顺序写出
     if (rank == 0) {
@@ -591,7 +390,7 @@ PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
                     << Axx_recv[idx]  << std::endl;
         }
         outfile.close();
-        PetscPrintf(PETSC_COMM_WORLD, "Data exported to %s\n", outname.c_str());
+        PetscPrintf(comm, "Data exported to %s\n", outname.c_str());
     }
 
     ierr = RestoreLocalArrays(axx, ayy, azz, akx, aky, akz,
@@ -605,7 +404,7 @@ PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
 // 打印网格信息
 void Mesh::printInfo() const
 {
-    PetscPrintf(PETSC_COMM_WORLD,
+    PetscPrintf(comm,
                 "Mesh Info:\n"
                 "  Global size: %ld x %ld x %ld\n"
                 "  Local size:  %ld x %ld x %ld\n"

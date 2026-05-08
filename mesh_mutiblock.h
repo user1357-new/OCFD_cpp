@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <memory>
 #include <mpi.h>
 
 class MultiBlockMesh {
@@ -33,6 +34,8 @@ private:
 public:
     MultiBlockMesh(const std::vector<std::array<PetscInt,3>> &procs,
                    PetscInt lap, PetscInt scheme_vis);
+    
+    ~MultiBlockMesh();
 
     void Initialize(const std::string &tecplot_filename);
 

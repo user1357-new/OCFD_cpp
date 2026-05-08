@@ -18,6 +18,7 @@ const int OCFD_Scheme_CD8 = 8;
 
 class Mesh {
 private:
+    MPI_Comm comm; 
     DM da;
     
     // 全局和局部网格尺寸
@@ -51,12 +52,7 @@ private:
     std::function<void()> boundary_condition_handler;
     
     // 私有方法
-    PetscErrorCode init_mesh();
     PetscErrorCode comput_Jacobian3d();
-    PetscErrorCode read_mesh3d();
-    PetscErrorCode read_mesh1d();
-    PetscErrorCode read_mesh2d_plane();
-    PetscErrorCode read_mesh2d_AxialSymm();
     
     // x/y/z方向导数计算（对应Fortran的OCFD_dx0/dy0/dz0）
     void compute_derivative_x(PetscReal ***f, PetscReal ***df);
@@ -70,14 +66,16 @@ private:
 public:
     // 构造函数：保留 npx0, npy0, npz0 以便您规定分块
     Mesh(PetscInt nx_g, PetscInt ny_g, PetscInt nz_g,
-         PetscInt my_id_, 
-         PetscInt npx0_, PetscInt npy0_, PetscInt npz0_,
-         PetscInt lap, PetscInt grid_type, PetscInt scheme_vis);
+     PetscInt my_id_, 
+     PetscInt npx0_, PetscInt npy0_, PetscInt npz0_,
+     PetscInt lap, PetscInt grid_type, PetscInt scheme_vis,
+     MPI_Comm comm = PETSC_COMM_WORLD);   // 默认值保持单块兼容
     
     ~Mesh();
-    
-    PetscErrorCode Initialize();
-    
+    PetscErrorCode InitializeFromCoordinates(
+        const std::vector<PetscReal> &x_global,
+        const std::vector<PetscReal> &y_global,
+        const std::vector<PetscReal> &z_global);
     // 注册边界条件处理函数（您自己实现周期性边界等）
     void RegisterBoundaryConditionHandler(std::function<void()> handler);
     

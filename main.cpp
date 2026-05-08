@@ -1,43 +1,42 @@
-
 #include "mesh.h"
+#include "mesh_mutiblock.h"
 #include <petsc.h>
 #include <mpi.h>
+#include <vector>
+#include <array>
+#include <string>
 
 int main(int argc, char **argv)
 {
     PetscInitialize(&argc, &argv, NULL, NULL);
-    
-    PetscMPIInt rank, size;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    MPI_Comm_size(PETSC_COMM_WORLD, &size);
-    
-    // 根据你的OCFD-grid.dat实际尺寸设置
-    PetscInt nx_global = 181;   // 改成你的实际值
-    PetscInt ny_global = 101;   // 改成你的实际值
-    PetscInt nz_global = 16;    // 2D平面，Z方向为1
-    
-    PetscInt npx0 = 2;
-    PetscInt npy0 = 2;
-    PetscInt npz0 = 1;
-    
-    PetscInt scheme_vis = OCFD_Scheme_CD6;
-    PetscInt LAP = (scheme_vis == OCFD_Scheme_CD8) ? 4 : 3;  // 自动根据差分格式设置stencil width
-    PetscInt grid_type = GRID2D_PLANE;  // 2D平面网格
-    
-    Mesh mesh(nx_global, ny_global, nz_global,
-              rank, npx0, npy0, npz0,
-              LAP, grid_type, scheme_vis);
-    
-    mesh.RegisterBoundaryConditionHandler([&]() {
-        // 边界条件处理
-    });
-    
-    mesh.Initialize();  // 这里会读取OCFD-grid.dat并计算Axx,Akx等
-    
-    mesh.printInfo();
-    
-    mesh.ExportToTecplot("mesh_data");
-    
+    {
+        PetscMPIInt rank;
+        MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+
+        PetscInt scheme_vis = OCFD_Scheme_CD6;
+        PetscInt LAP = (scheme_vis == OCFD_Scheme_CD8) ? 4 : 3;
+
+        // 定义每个块的进程分解，顺序要与 Tecplot 文件中的块顺序一致
+        std::vector<std::array<PetscInt,3>> procs = {
+            {2, 1, 1},   // 第1块
+            {2, 1, 1},   // 第2块
+            {2, 1, 1},   // 第3块
+            {2, 1, 1},   // 第4块
+            {2, 1, 1},   // 第5块
+            {2, 1, 1}    // 第6块
+        };
+
+        MultiBlockMesh multiMesh(procs, LAP, scheme_vis);
+        multiMesh.Initialize("1.dat");
+
+        for (int b = 0; b < multiMesh.getNumBlocks(); ++b) {
+            Mesh* block = multiMesh.getBlock(b);
+            if (block) {
+                block->printInfo();
+                block->ExportToTecplot("block_" + std::to_string(b));
+            }
+        }
+    } // multiMesh 在这里析构，MPI 仍有效
     PetscFinalize();
     return 0;
 }

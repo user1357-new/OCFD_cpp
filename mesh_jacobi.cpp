@@ -400,7 +400,7 @@ PetscErrorCode Mesh::comput_Jacobian3d()
                 asz1[k][j][i] = asz[k][j][i] / ajac[k][j][i];
 
                 if (Jac1 < 0) {
-                    PetscPrintf(PETSC_COMM_WORLD,
+                    PetscPrintf(comm,
                                " Jacobian < 0 !!! , Jac=%f\n", Jac1);
                 }
             }
