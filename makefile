@@ -1,31 +1,33 @@
-CXX = mpicxx
-CXXFLAGS = -std=c++17 -O2
-
 # PETSc 配置
 PETSC_DIR ?= /home/v/PETSc/petsc-3.25.0
 PETSC_ARCH ?= arch-linux-c-debug
-PETSC_INCLUDE = -I${PETSC_DIR}/include -I${PETSC_DIR}/${PETSC_ARCH}/include
-PETSC_LIB = -L${PETSC_DIR}/${PETSC_ARCH}/lib -lpetsc -lm
-MPIEXEC = ${PETSC_DIR}/${PETSC_ARCH}/bin/mpiexec
 
-
-# 引入 PETSc 的变量和规则，自动处理包含路径、库路径和链接器
+# 只引入变量（不引入 rules，避免模式和我们的规则冲突）
 include $(PETSC_DIR)/lib/petsc/conf/variables
-include $(PETSC_DIR)/lib/petsc/conf/rules
+
+# 编译器：由 PETSc variables 提供 CXX（通常是 mpicxx）
+# 编译标志：PETSC_CCPPFLAGS 包含所有 PETSc 头文件路径
+CXXFLAGS = -std=c++17 -O2 $(PETSC_CCPPFLAGS)
 
 TARGET = main
-SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp mesh_ghost.cpp 
+SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp mesh_ghost.cpp BC_ghost_filler.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)
 
+# 链接：用 CXX 直接链接，加上 PETSc 库
 $(TARGET): $(OBJS)
-	$(CLINKER) -o $@ $(OBJS) $(PETSC_LIB)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(PETSC_LIB)
 
-%.o: %.cpp mesh.h
-	$(CXX) $(CXXFLAGS) $(PETSC_INCLUDE) -c $< -o $@
+# 编译规则：每个 .cpp 依赖自己的 .h（mesh.h 是公共依赖）
+%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: $(TARGET)
-	LD_LIBRARY_PATH=${PETSC_DIR}/${PETSC_ARCH}/lib:$$LD_LIBRARY_PATH $(MPIEXEC) -np 12 -bind-to none ./$(TARGET)
+	LD_LIBRARY_PATH=$(PETSC_DIR)/$(PETSC_ARCH)/lib:$$LD_LIBRARY_PATH \
+	$(MPIEXEC) -np 16 -bind-to none ./$(TARGET)
+
+clean:
+	rm -f $(OBJS) $(TARGET) *.dat
 
 .PHONY: all clean run

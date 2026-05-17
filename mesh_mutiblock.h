@@ -7,12 +7,13 @@
 #include <array>
 #include <memory>
 #include <mpi.h>
+#include "mesh_mutiblock.h"
 
 class MultiBlockMesh {
 private:
     PetscInt LAP;
     PetscInt scheme_vis;
-    
+    std::vector<std::string> block_names_; 
     // 每个块的进程分解：{{npx, npy, npz}, ...}
     std::vector<std::array<PetscInt,3>> block_procs_;
     // 每个块的子通信域（非本块进程为 MPI_COMM_NULL）
@@ -38,7 +39,7 @@ public:
     ~MultiBlockMesh();
 
     void Initialize(const std::string &tecplot_filename);
-
+    void ExportAllToTecplot(const std::string &filename);
     PetscInt getNumBlocks() const { return blocks_.size(); }
 
     // 获取本块所属网格（若本进程不属于该块则返回 nullptr）

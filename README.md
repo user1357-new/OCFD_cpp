@@ -1,6 +1,12 @@
 <<<<<<< HEAD
-# CFD_mesh_1cpu
-1cpu is available but mult-cpu get err
+# CFD_mesh
+mult-cpu reading mesh
+FACE_LEFT   = 0
+FACE_RIGHT  = 1
+FACE_BOTTOM = 2
+FACE_TOP    = 3
+FACE_BACK   = 4
+FACE_FRONT  = 5
 # test
 =======
 # OCFD_cpp

@@ -228,7 +228,21 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename) {
         }
     }
     MPI_Bcast(dims.data(), 3 * num_blocks, MPIU_INT, 0, PETSC_COMM_WORLD);
-
+    // 广播每个块的名称
+    block_names_.resize(num_blocks);
+    if (rank == 0) {
+        for (PetscInt i = 0; i < num_blocks; i++) {
+            block_names_[i] = infos[i].name;
+        }
+    }
+    for (PetscInt i = 0; i < num_blocks; i++) {
+        int len = (rank == 0) ? static_cast<int>(block_names_[i].size()) : 0;
+        MPI_Bcast(&len, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+        if (rank != 0) block_names_[i].resize(len);
+        if (len > 0) {
+            MPI_Bcast(&block_names_[i][0], len, MPI_CHAR, 0, PETSC_COMM_WORLD);
+            }
+    }
     // ---------- 6. 全局 rank 0 预先发送坐标给各块的第一个进程 ----------
     const int tag = 12345;
     if (rank == 0) {
@@ -400,6 +414,54 @@ PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
     CHKERRQ(ierr);
 
     return 0;
+}
+//输出一个文件
+void MultiBlockMesh::ExportAllToTecplot(const std::string &filename) {
+    // 每个块输出独立的临时文件
+    for (PetscInt b = 0; b < static_cast<PetscInt>(blocks_.size()); ++b) {
+        if (blocks_[b]) {
+            blocks_[b]->ExportToTecplot("_temp_block_" + std::to_string(b));
+        }
+    }
+
+    MPI_Barrier(PETSC_COMM_WORLD); // 等待所有块写完
+
+    PetscMPIInt rank;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    if (rank == 0) {
+        std::string outname = filename + ".dat";
+        std::ofstream outfile(outname);
+        outfile << "TITLE = \"Multi-Block Grid\"\n";
+        outfile << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\", \"Akx1\", \"Axx\"\n";
+
+        for (PetscInt b = 0; b < static_cast<PetscInt>(blocks_.size()); ++b) {
+            std::string tempname = "_temp_block_" + std::to_string(b) + ".dat";
+            std::ifstream tempfile(tempname);
+            if (!tempfile.is_open()) {
+                PetscPrintf(PETSC_COMM_WORLD, "Warning: cannot open %s\n", tempname.c_str());
+                continue;
+            }
+            std::string line;
+            bool in_zone = false;
+            while (std::getline(tempfile, line)) {
+                if (line.find("ZONE") != std::string::npos) {
+                    size_t pos = line.find("T=\"Full Grid\"");
+                    if (pos != std::string::npos && b < static_cast<PetscInt>(block_names_.size())) {
+                        // 只替换 "Full Grid" 这9个字符，保留前后的双引号
+                        line.replace(pos + 3, 9, block_names_[b]);
+                    }
+                    outfile << line << "\n";
+                    in_zone = true;
+                } else if (in_zone) {
+                    outfile << line << "\n";
+                }
+            }
+            tempfile.close();
+            ::remove(tempname.c_str());  // 删除临时文件
+        }
+        outfile.close();
+        PetscPrintf(PETSC_COMM_WORLD, "Multi-block data merged into %s\n", outname.c_str());
+    }
 }
 // 打印网格信息
 void Mesh::printInfo() const

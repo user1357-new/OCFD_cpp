@@ -8,6 +8,8 @@
 #include <vector>
 #include <string> 
 // x方向导数计算
+// f  : 来自 DMDAVecGetArray，用全局索引（含 ghost）
+// df : 手动分配，用 0-based 局部索引 [kl][jl][il]
 void Mesh::compute_derivative_x(PetscReal ***f, PetscReal ***df)
 {
     DMDALocalInfo info;
@@ -31,8 +33,11 @@ void Mesh::compute_derivative_x(PetscReal ***f, PetscReal ***df)
     
     // 遍历所有局部网格点，根据距离边界的层数自动选择差分格式
     for (PetscInt k = zs; k < zs + zm; k++) {
+        PetscInt kl = k - zs;
         for (PetscInt j = ys; j < ys + ym; j++) {
+            PetscInt jl = j - ys;
             for (PetscInt i = xs; i < xs + xm; i++) {
+                PetscInt il = i - xs;
                 if (i < 0 || i >= nx_global) {
                     continue;
                 }
@@ -44,25 +49,25 @@ void Mesh::compute_derivative_x(PetscReal ***f, PetscReal ***df)
                 if (min_dist == 0) {
                     // 第1层：边界点，使用单侧2阶差分
                     if (i == 0) {
-                        df[k][j][i] = (-3.0 * f[k][j][i] + 4.0 * f[k][j][i+1] - f[k][j][i+2]) / (2.0 * hx);
+                        df[kl][jl][il] = (-3.0 * f[k][j][i] + 4.0 * f[k][j][i+1] - f[k][j][i+2]) / (2.0 * hx);
                     } else {
-                        df[k][j][i] = (f[k][j][i-2] - 4.0 * f[k][j][i-1] + 3.0 * f[k][j][i]) / (2.0 * hx);
+                        df[kl][jl][il] = (f[k][j][i-2] - 4.0 * f[k][j][i-1] + 3.0 * f[k][j][i]) / (2.0 * hx);
                     }
                 } else if (min_dist == 1) {
                     // 第2层：使用中心2阶差分
-                    df[k][j][i] = (f[k][j][i+1] - f[k][j][i-1]) / (2.0 * hx);
+                    df[kl][jl][il] = (f[k][j][i+1] - f[k][j][i-1]) / (2.0 * hx);
                 } else if (min_dist == 2) {
                     // 第3层：使用4阶中心差分
-                    df[k][j][i] = (8.0 * (f[k][j][i+1] - f[k][j][i-1]) 
+                    df[kl][jl][il] = (8.0 * (f[k][j][i+1] - f[k][j][i-1]) 
                                   - (f[k][j][i+2] - f[k][j][i-2])) / (12.0 * hx);
                 } else {
                     // 第4层及以上：使用高阶中心差分
                     if (Scheme_Vis == OCFD_Scheme_CD6) {
-                        df[k][j][i] = a1 * (f[k][j][i+3] - f[k][j][i-3]) 
+                        df[kl][jl][il] = a1 * (f[k][j][i+3] - f[k][j][i-3]) 
                                     + a2 * (f[k][j][i+2] - f[k][j][i-2]) 
                                     + a3 * (f[k][j][i+1] - f[k][j][i-1]);
                     } else if (Scheme_Vis == OCFD_Scheme_CD8) {
-                        df[k][j][i] = c1 * (f[k][j][i+1] - f[k][j][i-1]) 
+                        df[kl][jl][il] = c1 * (f[k][j][i+1] - f[k][j][i-1]) 
                                     + c2 * (f[k][j][i+2] - f[k][j][i-2]) 
                                     + c3 * (f[k][j][i+3] - f[k][j][i-3]) 
                                     + c4 * (f[k][j][i+4] - f[k][j][i-4]);
@@ -72,8 +77,9 @@ void Mesh::compute_derivative_x(PetscReal ***f, PetscReal ***df)
         }
     }
 }
-
 // y方向导数计算
+// f  : 来自 DMDAVecGetArray，用全局索引（含 ghost）
+// df : 手动分配，用 0-based 局部索引 [kl][jl][il]
 void Mesh::compute_derivative_y(PetscReal ***f, PetscReal ***df)
 {
     DMDALocalInfo info;
@@ -97,8 +103,11 @@ void Mesh::compute_derivative_y(PetscReal ***f, PetscReal ***df)
     
     // 遍历所有局部网格点，根据距离边界的层数自动选择差分格式
     for (PetscInt k = zs; k < zs + zm; k++) {
+        PetscInt kl = k - zs;
         for (PetscInt j = ys; j < ys + ym; j++) {
+            PetscInt jl = j - ys;
             for (PetscInt i = xs; i < xs + xm; i++) {
+                PetscInt il = i - xs;
                 if (j < 0 || j >= ny_global) {
                     continue;
                 }
@@ -110,25 +119,25 @@ void Mesh::compute_derivative_y(PetscReal ***f, PetscReal ***df)
                 if (min_dist == 0) {
                     // 第1层：边界点，使用单侧2阶差分
                     if (j == 0) {
-                        df[k][j][i] = (-3.0 * f[k][j][i] + 4.0 * f[k][j+1][i] - f[k][j+2][i]) / (2.0 * hy);
+                        df[kl][jl][il] = (-3.0 * f[k][j][i] + 4.0 * f[k][j+1][i] - f[k][j+2][i]) / (2.0 * hy);
                     } else {
-                        df[k][j][i] = (f[k][j-2][i] - 4.0 * f[k][j-1][i] + 3.0 * f[k][j][i]) / (2.0 * hy);
+                        df[kl][jl][il] = (f[k][j-2][i] - 4.0 * f[k][j-1][i] + 3.0 * f[k][j][i]) / (2.0 * hy);
                     }
                 } else if (min_dist == 1) {
                     // 第2层：使用中心2阶差分
-                    df[k][j][i] = (f[k][j+1][i] - f[k][j-1][i]) / (2.0 * hy);
+                    df[kl][jl][il] = (f[k][j+1][i] - f[k][j-1][i]) / (2.0 * hy);
                 } else if (min_dist == 2) {
                     // 第3层：使用4阶中心差分
-                    df[k][j][i] = (8.0 * (f[k][j+1][i] - f[k][j-1][i]) 
+                    df[kl][jl][il] = (8.0 * (f[k][j+1][i] - f[k][j-1][i]) 
                                   - (f[k][j+2][i] - f[k][j-2][i])) / (12.0 * hy);
                 } else {
                     // 第4层及以上：使用高阶中心差分
                     if (Scheme_Vis == OCFD_Scheme_CD6) {
-                        df[k][j][i] = a1 * (f[k][j+3][i] - f[k][j-3][i]) 
+                        df[kl][jl][il] = a1 * (f[k][j+3][i] - f[k][j-3][i]) 
                                     + a2 * (f[k][j+2][i] - f[k][j-2][i]) 
                                     + a3 * (f[k][j+1][i] - f[k][j-1][i]);
                     } else if (Scheme_Vis == OCFD_Scheme_CD8) {
-                        df[k][j][i] = c1 * (f[k][j+1][i] - f[k][j-1][i]) 
+                        df[kl][jl][il] = c1 * (f[k][j+1][i] - f[k][j-1][i]) 
                                     + c2 * (f[k][j+2][i] - f[k][j-2][i]) 
                                     + c3 * (f[k][j+3][i] - f[k][j-3][i]) 
                                     + c4 * (f[k][j+4][i] - f[k][j-4][i]);
@@ -138,8 +147,9 @@ void Mesh::compute_derivative_y(PetscReal ***f, PetscReal ***df)
         }
     }
 }
-
 // z方向导数计算
+// f  : 来自 DMDAVecGetArray，用全局索引（含 ghost）
+// df : 手动分配，用 0-based 局部索引 [kl][jl][il]
 void Mesh::compute_derivative_z(PetscReal ***f, PetscReal ***df)
 {
     DMDALocalInfo info;
@@ -163,8 +173,11 @@ void Mesh::compute_derivative_z(PetscReal ***f, PetscReal ***df)
     
     // 遍历所有局部网格点，根据距离边界的层数自动选择差分格式
     for (PetscInt k = zs; k < zs + zm; k++) {
+        PetscInt kl = k - zs;
         for (PetscInt j = ys; j < ys + ym; j++) {
+            PetscInt jl = j - ys;
             for (PetscInt i = xs; i < xs + xm; i++) {
+                PetscInt il = i - xs;
                 if (k < 0 || k >= nz_global) {
                     continue;
                 }
@@ -176,25 +189,25 @@ void Mesh::compute_derivative_z(PetscReal ***f, PetscReal ***df)
                 if (min_dist == 0) {
                     // 第1层：边界点，使用单侧2阶差分
                     if (k == 0) {
-                        df[k][j][i] = (-3.0 * f[k][j][i] + 4.0 * f[k+1][j][i] - f[k+2][j][i]) / (2.0 * hz);
+                        df[kl][jl][il] = (-3.0 * f[k][j][i] + 4.0 * f[k+1][j][i] - f[k+2][j][i]) / (2.0 * hz);
                     } else {
-                        df[k][j][i] = (f[k-2][j][i] - 4.0 * f[k-1][j][i] + 3.0 * f[k][j][i]) / (2.0 * hz);
+                        df[kl][jl][il] = (f[k-2][j][i] - 4.0 * f[k-1][j][i] + 3.0 * f[k][j][i]) / (2.0 * hz);
                     }
                 } else if (min_dist == 1) {
                     // 第2层：使用中心2阶差分
-                    df[k][j][i] = (f[k+1][j][i] - f[k-1][j][i]) / (2.0 * hz);
+                    df[kl][jl][il] = (f[k+1][j][i] - f[k-1][j][i]) / (2.0 * hz);
                 } else if (min_dist == 2) {
                     // 第3层：使用4阶中心差分
-                    df[k][j][i] = (8.0 * (f[k+1][j][i] - f[k-1][j][i]) 
+                    df[kl][jl][il] = (8.0 * (f[k+1][j][i] - f[k-1][j][i]) 
                                   - (f[k+2][j][i] - f[k-2][j][i])) / (12.0 * hz);
                 } else {
                     // 第4层及以上：使用高阶中心差分
                     if (Scheme_Vis == OCFD_Scheme_CD6) {
-                        df[k][j][i] = a1 * (f[k+3][j][i] - f[k-3][j][i]) 
+                        df[kl][jl][il] = a1 * (f[k+3][j][i] - f[k-3][j][i]) 
                                     + a2 * (f[k+2][j][i] - f[k-2][j][i]) 
                                     + a3 * (f[k+1][j][i] - f[k-1][j][i]);
                     } else if (Scheme_Vis == OCFD_Scheme_CD8) {
-                        df[k][j][i] = c1 * (f[k+1][j][i] - f[k-1][j][i]) 
+                        df[kl][jl][il] = c1 * (f[k+1][j][i] - f[k-1][j][i]) 
                                     + c2 * (f[k+2][j][i] - f[k-2][j][i]) 
                                     + c3 * (f[k+3][j][i] - f[k-3][j][i]) 
                                     + c4 * (f[k+4][j][i] - f[k-4][j][i]);
@@ -243,7 +256,7 @@ PetscErrorCode Mesh::comput_Jacobian3d()
     ierr = DMGlobalToLocalBegin(da, Azz, INSERT_VALUES, Azz_local); CHKERRQ(ierr);
     ierr = DMGlobalToLocalEnd(da, Azz, INSERT_VALUES, Azz_local); CHKERRQ(ierr);
 
-    // 3. 获取局部数组指针（包含 ghost，可用全局索引访问邻居点）
+    // 3. 获取局部数组指针（包含 ghost，可用全局索引访问，PETSc 的 C 接口保证这一点）
     PetscReal ***axx, ***ayy, ***azz;
     ierr = DMDAVecGetArray(da, Axx_local, &axx); CHKERRQ(ierr);
     ierr = DMDAVecGetArray(da, Ayy_local, &ayy); CHKERRQ(ierr);
@@ -284,70 +297,51 @@ PetscErrorCode Mesh::comput_Jacobian3d()
     PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
     PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
 
-    // 6. 分配临时导数数组
-    // 要点：数组每一维的大小必须能容纳使用全局索引的直接访问
-    // 即 xi[k][j][i], k∈[zs, zs+zm-1], j∈[ys, ys+ym-1], i∈[xs, xs+xm-1]
+    // 6. 分配临时导数数组，大小 = zm × ym × xm，全部用局部索引 [kl][jl][il] 访问
+    //   xi[kl][jl][il] = ∂x/∂ξ 在 (i=xs+il, j=ys+jl, k=zs+kl) 处的值
+    //   f 数组（来自 DMDAVecGetArray）用全局索引不变
     PetscReal ***xi, ***xj, ***xk;
     PetscReal ***yi, ***yj, ***yk;
     PetscReal ***zi, ***zj, ***zk;
 
-    PetscInt total_z = zs + zm;   // 第一维大小
-    PetscInt total_y = ys + ym;   // 第二维大小
-    PetscInt total_x = xs + xm;   // 第三维大小
+    ierr = PetscMalloc1(zm, &xi); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &xj); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &xk); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &yi); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &yj); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &yk); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &zi); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &zj); CHKERRQ(ierr);
+    ierr = PetscMalloc1(zm, &zk); CHKERRQ(ierr);
 
-    // 分配第一维（k 方向）
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &xi); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &xj); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &xk); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &yi); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &yj); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &yk); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &zi); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &zj); CHKERRQ(ierr);
-    ierr = PetscMalloc(total_z * sizeof(PetscReal**), &zk); CHKERRQ(ierr);
+    for (PetscInt kl = 0; kl < zm; kl++) {
+        ierr = PetscMalloc1(ym, &xi[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &xj[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &xk[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &yi[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &yj[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &yk[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &zi[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &zj[kl]); CHKERRQ(ierr);
+        ierr = PetscMalloc1(ym, &zk[kl]); CHKERRQ(ierr);
 
-    // 前 zs 层不会被访问，设为 NULL 防止误用
-    for (PetscInt k = 0; k < zs; k++) {
-        xi[k] = NULL; xj[k] = NULL; xk[k] = NULL;
-        yi[k] = NULL; yj[k] = NULL; yk[k] = NULL;
-        zi[k] = NULL; zj[k] = NULL; zk[k] = NULL;
-    }
-
-    // 为真正使用的 z 层分配 j 和 i 方向
-    for (PetscInt k = zs; k < zs + zm; k++) {
-        // 分配第二维（j 方向），大小为 total_y
-        PetscMalloc(total_y * sizeof(PetscReal*), &xi[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &xj[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &xk[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &yi[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &yj[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &yk[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &zi[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &zj[k]);
-        PetscMalloc(total_y * sizeof(PetscReal*), &zk[k]);
-
-        // 前 ys 行未使用，设为 NULL
-        for (PetscInt j = 0; j < ys; j++) {
-            xi[k][j] = NULL; xj[k][j] = NULL; xk[k][j] = NULL;
-            yi[k][j] = NULL; yj[k][j] = NULL; yk[k][j] = NULL;
-            zi[k][j] = NULL; zj[k][j] = NULL; zk[k][j] = NULL;
-        }
-
-        // 为实际使用的 y 行分配第三维（i 方向）
-        for (PetscInt j = ys; j < ys + ym; j++) {
-            PetscMalloc(total_x * sizeof(PetscReal), &xi[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &xj[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &xk[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &yi[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &yj[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &yk[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &zi[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &zj[k][j]);
-            PetscMalloc(total_x * sizeof(PetscReal), &zk[k][j]);
+        for (PetscInt jl = 0; jl < ym; jl++) {
+            ierr = PetscMalloc1(xm, &xi[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &xj[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &xk[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &yi[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &yj[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &yk[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &zi[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &zj[kl][jl]); CHKERRQ(ierr);
+            ierr = PetscMalloc1(xm, &zk[kl][jl]); CHKERRQ(ierr);
         }
     }
 
-    // 7. 计算导数（传入含 ghost 的局部数组，写入到我们刚分配的大数组）
+    // 7. 计算导数
+    //   f 参数：来自 DMDAVecGetArray，用全局索引（含 ghost）
+    //   df 参数：手动分配的临时数组，用 0-based 局部索引
+    //   compute_derivative_* 写入时自动使用局部索引
     compute_derivative_x(axx, xi);
     compute_derivative_x(ayy, yi);
     compute_derivative_x(azz, zi);
@@ -360,19 +354,25 @@ PetscErrorCode Mesh::comput_Jacobian3d()
     compute_derivative_z(ayy, yk);
     compute_derivative_z(azz, zk);
 
-    // 8. 计算雅可比系数（只遍历本进程的物理点）
+    // 8. 计算雅可比系数
+    //   ajac/akx/... 来自 DMDAVecGetArray → 全局索引
+    //   xi/xj/... 是局部临时数组 → 局部索引 [kl][jl][il]
     for (PetscInt k = zs; k < zs + zm; k++) {
+        PetscInt kl = k - zs;
         for (PetscInt j = ys; j < ys + ym; j++) {
+            PetscInt jl = j - ys;
             for (PetscInt i = xs; i < xs + xm; i++) {
-                PetscReal xi1 = xi[k][j][i];
-                PetscReal xj1 = xj[k][j][i];
-                PetscReal xk1 = xk[k][j][i];
-                PetscReal yi1 = yi[k][j][i];
-                PetscReal yj1 = yj[k][j][i];
-                PetscReal yk1 = yk[k][j][i];
-                PetscReal zi1 = zi[k][j][i];
-                PetscReal zj1 = zj[k][j][i];
-                PetscReal zk1 = zk[k][j][i];
+                PetscInt il = i - xs;
+
+                PetscReal xi1 = xi[kl][jl][il];
+                PetscReal xj1 = xj[kl][jl][il];
+                PetscReal xk1 = xk[kl][jl][il];
+                PetscReal yi1 = yi[kl][jl][il];
+                PetscReal yj1 = yj[kl][jl][il];
+                PetscReal yk1 = yk[kl][jl][il];
+                PetscReal zi1 = zi[kl][jl][il];
+                PetscReal zj1 = zj[kl][jl][il];
+                PetscReal zk1 = zk[kl][jl][il];
 
                 PetscReal Jac1 = 1.0 / (xi1*yj1*zk1 + yi1*zj1*xk1 + zi1*xj1*yk1
                                       - zi1*yj1*xk1 - yi1*xj1*zk1 - xi1*zj1*yk1);
@@ -408,27 +408,27 @@ PetscErrorCode Mesh::comput_Jacobian3d()
     }
 
     // 9. 释放临时导数数组（顺序与分配相反）
-    for (PetscInt k = zs; k < zs + zm; k++) {
-        for (PetscInt j = ys; j < ys + ym; j++) {
-            PetscFree(xi[k][j]);
-            PetscFree(xj[k][j]);
-            PetscFree(xk[k][j]);
-            PetscFree(yi[k][j]);
-            PetscFree(yj[k][j]);
-            PetscFree(yk[k][j]);
-            PetscFree(zi[k][j]);
-            PetscFree(zj[k][j]);
-            PetscFree(zk[k][j]);
+    for (PetscInt kl = 0; kl < zm; kl++) {
+        for (PetscInt jl = 0; jl < ym; jl++) {
+            PetscFree(xi[kl][jl]);
+            PetscFree(xj[kl][jl]);
+            PetscFree(xk[kl][jl]);
+            PetscFree(yi[kl][jl]);
+            PetscFree(yj[kl][jl]);
+            PetscFree(yk[kl][jl]);
+            PetscFree(zi[kl][jl]);
+            PetscFree(zj[kl][jl]);
+            PetscFree(zk[kl][jl]);
         }
-        PetscFree(xi[k]);
-        PetscFree(xj[k]);
-        PetscFree(xk[k]);
-        PetscFree(yi[k]);
-        PetscFree(yj[k]);
-        PetscFree(yk[k]);
-        PetscFree(zi[k]);
-        PetscFree(zj[k]);
-        PetscFree(zk[k]);
+        PetscFree(xi[kl]);
+        PetscFree(xj[kl]);
+        PetscFree(xk[kl]);
+        PetscFree(yi[kl]);
+        PetscFree(yj[kl]);
+        PetscFree(yk[kl]);
+        PetscFree(zi[kl]);
+        PetscFree(zj[kl]);
+        PetscFree(zk[kl]);
     }
     PetscFree(xi);
     PetscFree(xj);
