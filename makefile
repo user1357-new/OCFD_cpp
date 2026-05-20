@@ -10,7 +10,7 @@ include $(PETSC_DIR)/lib/petsc/conf/variables
 CXXFLAGS = -std=c++17 -O2 $(PETSC_CCPPFLAGS)
 
 TARGET = main
-SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp mesh_ghost.cpp BC_ghost_filler.cpp
+SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp mesh_ghost.cpp BC_ghost_filler.cpp sim_config.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)
@@ -20,7 +20,7 @@ $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(PETSC_LIB)
 
 # 编译规则：每个 .cpp 依赖自己的 .h（mesh.h 是公共依赖）
-%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h
+%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h sim_config.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: $(TARGET)

@@ -431,198 +431,23 @@ PetscErrorCode Mesh::restoreLocalMetricArrays(PetscReal*** &akx, PetscReal*** &a
     ierr = DMDAVecRestoreArray(da, Ajac_local, &ajac); CHKERRQ(ierr);
     return 0;
 }
-
 // ====================================================================
-// fillAllMetricConstOnGhost - 对指定面所有度量系数做 ghost 常数延拓
+// getLocalCoordinateVecs - 返回坐标持久化 local Vec（3个）
 // ====================================================================
-PetscErrorCode Mesh::fillAllMetricConstOnGhost(int face)
+std::vector<Vec> Mesh::getLocalCoordinateVecs() const
 {
-    PetscErrorCode ierr;
-
-    DMDALocalInfo info;
-    PetscReal ***akx, ***aky, ***akz;
-    PetscReal ***aix, ***aiy, ***aiz;
-    PetscReal ***asx, ***asy, ***asz;
-    PetscReal ***ajac;
-    
-    ierr = getLocalMetricArrays(akx, aky, akz, aix, aiy, aiz, asx, asy, asz, ajac, info); CHKERRQ(ierr);
-
-    // 全局尺寸
-    PetscInt nxg = nx_global;
-    PetscInt nyg = ny_global;
-    PetscInt nzg = nz_global;
-
-    // 局部数组范围（含 ghost）
-    PetscInt gxs = info.gxs, gxe = info.gxs + info.gxm;
-    PetscInt gys = info.gys, gye = info.gys + info.gym;
-    PetscInt gzs = info.gzs, gze = info.gzs + info.gzm;
-
-    // 确定该面 ghost 区域索引范围
-    PetscInt i_lo = gxs, i_hi = gxe - 1;
-    PetscInt j_lo = gys, j_hi = gye - 1;
-    PetscInt k_lo = gzs, k_hi = gze - 1;
-
-    switch (face) {
-    case 0: i_hi = -1;         j_lo = 0; j_hi = nyg - 1;   k_lo = 0; k_hi = nzg - 1; break;
-    case 1: i_lo = nxg;        j_lo = 0; j_hi = nyg - 1;   k_lo = 0; k_hi = nzg - 1; break;
-    case 2: i_lo = 0; i_hi = nxg - 1;   j_hi = -1;         k_lo = 0; k_hi = nzg - 1; break;
-    case 3: i_lo = 0; i_hi = nxg - 1;   j_lo = nyg;        k_lo = 0; k_hi = nzg - 1; break;
-    case 4: i_lo = 0; i_hi = nxg - 1;   j_lo = 0; j_hi = nyg - 1;   k_hi = -1;        break;
-    case 5: i_lo = 0; i_hi = nxg - 1;   j_lo = 0; j_hi = nyg - 1;   k_lo = nzg;       break;
-    }
-
-    // 裁剪到局部范围
-    if (i_lo < gxs) i_lo = gxs;
-    if (i_hi > gxe - 1) i_hi = gxe - 1;
-    if (j_lo < gys) j_lo = gys;
-    if (j_hi > gye - 1) j_hi = gye - 1;
-    if (k_lo < gzs) k_lo = gzs;
-    if (k_hi > gze - 1) k_hi = gze - 1;
-
-    if (i_lo <= i_hi && j_lo <= j_hi && k_lo <= k_hi) {
-        // 常数延拓：所有 10 个度量系数同时做
-        for (PetscInt k = k_lo; k <= k_hi; ++k) {
-            for (PetscInt j = j_lo; j <= j_hi; ++j) {
-                for (PetscInt i = i_lo; i <= i_hi; ++i) {
-                    // 跳过物理域
-                    if (i >= 0 && i < nxg && j >= 0 && j < nyg && k >= 0 && k < nzg)
-                        continue;
-
-                    // 边界点
-                    PetscInt ib, jb, kb;
-                    switch (face) {
-                    case 0: ib = 0;       jb = j; kb = k; break;
-                    case 1: ib = nxg - 1; jb = j; kb = k; break;
-                    case 2: ib = i; jb = 0;       kb = k; break;
-                    case 3: ib = i; jb = nyg - 1; kb = k; break;
-                    case 4: ib = i; jb = j; kb = 0;       break;
-                    case 5: ib = i; jb = j; kb = nzg - 1; break;
-                    }
-
-                    // 一次性复制所有度量系数
-                    akx[k][j][i] = akx[kb][jb][ib];
-                    aky[k][j][i] = aky[kb][jb][ib];
-                    akz[k][j][i] = akz[kb][jb][ib];
-                    aix[k][j][i] = aix[kb][jb][ib];
-                    aiy[k][j][i] = aiy[kb][jb][ib];
-                    aiz[k][j][i] = aiz[kb][jb][ib];
-                    asx[k][j][i] = asx[kb][jb][ib];
-                    asy[k][j][i] = asy[kb][jb][ib];
-                    asz[k][j][i] = asz[kb][jb][ib];
-                    ajac[k][j][i] = ajac[kb][jb][ib];
-                }
-            }
-        }
-    }
-
-    ierr = restoreLocalMetricArrays(akx, aky, akz, aix, aiy, aiz, asx, asy, asz, ajac); CHKERRQ(ierr);
-    return 0;
-}
-// ====================================================================
-// fillAllMetricLinearOnGhost - 一阶线性外推
-// ====================================================================
-PetscErrorCode Mesh::fillAllMetricLinearOnGhost(int face)
-{
-    PetscErrorCode ierr;
-    DMDALocalInfo info;
-    PetscReal ***akx, ***aky, ***akz, ***aix, ***aiy, ***aiz, ***asx, ***asy, ***asz, ***ajac;
-    ierr = getLocalMetricArrays(akx,aky,akz,aix,aiy,aiz,asx,asy,asz,ajac,info); CHKERRQ(ierr);
-
-    PetscInt nxg=nx_global, nyg=ny_global, nzg=nz_global;
-    PetscInt gxs=info.gxs, gxe=info.gxs+info.gxm, gys=info.gys, gye=info.gys+info.gym, gzs=info.gzs, gze=info.gzs+info.gzm;
-    PetscInt i_lo=gxs,i_hi=gxe-1, j_lo=gys,j_hi=gye-1, k_lo=gzs,k_hi=gze-1;
-
-    switch(face){
-    case 0:i_hi=-1;     j_lo=0;j_hi=nyg-1; k_lo=0;k_hi=nzg-1; break;
-    case 1:i_lo=nxg;    j_lo=0;j_hi=nyg-1; k_lo=0;k_hi=nzg-1; break;
-    case 2:i_lo=0;i_hi=nxg-1; j_hi=-1;     k_lo=0;k_hi=nzg-1; break;
-    case 3:i_lo=0;i_hi=nxg-1; j_lo=nyg;    k_lo=0;k_hi=nzg-1; break;
-    case 4:i_lo=0;i_hi=nxg-1; j_lo=0;j_hi=nyg-1; k_hi=-1;     break;
-    case 5:i_lo=0;i_hi=nxg-1; j_lo=0;j_hi=nyg-1; k_lo=nzg;    break;
-    }
-    if(i_lo<gxs)i_lo=gxs; if(i_hi>gxe-1)i_hi=gxe-1;
-    if(j_lo<gys)j_lo=gys; if(j_hi>gye-1)j_hi=gye-1;
-    if(k_lo<gzs)k_lo=gzs; if(k_hi>gze-1)k_hi=gze-1;
-
-    if(i_lo<=i_hi && j_lo<=j_hi && k_lo<=k_hi){
-        for(PetscInt k=k_lo;k<=k_hi;++k){
-            for(PetscInt j=j_lo;j<=j_hi;++j){
-                for(PetscInt i=i_lo;i<=i_hi;++i){
-                    if(i>=0&&i<nxg && j>=0&&j<nyg && k>=0&&k<nzg) continue;
-
-                    PetscInt ib,jb,kb, i2,j2,k2; PetscReal dist=0;
-                    switch(face){
-                    case 0:ib=0;      jb=j;kb=k; i2=ib+1;j2=j;k2=k; dist=(PetscReal)(-i); break;
-                    case 1:ib=nxg-1;  jb=j;kb=k; i2=ib-1;j2=j;k2=k; dist=(PetscReal)(i-(nxg-1)); break;
-                    case 2:ib=i;jb=0;      kb=k; i2=i;j2=jb+1;k2=k; dist=(PetscReal)(-j); break;
-                    case 3:ib=i;jb=nyg-1;  kb=k; i2=i;j2=jb-1;k2=k; dist=(PetscReal)(j-(nyg-1)); break;
-                    case 4:ib=i;jb=j;kb=0;       i2=i;j2=j;k2=kb+1; dist=(PetscReal)(-k); break;
-                    case 5:ib=i;jb=j;kb=nzg-1;   i2=i;j2=j;k2=kb-1; dist=(PetscReal)(k-(nzg-1)); break;
-                    }
-
-#define LIN(M) M[k][j][i] = M[kb][jb][ib] + dist*(M[kb][jb][ib] - M[k2][j2][i2])
-                    LIN(akx);LIN(aky);LIN(akz);LIN(aix);LIN(aiy);LIN(aiz);
-                    LIN(asx);LIN(asy);LIN(asz);LIN(ajac);
-#undef LIN
-                }
-            }
-        }
-    }
-    ierr = restoreLocalMetricArrays(akx,aky,akz,aix,aiy,aiz,asx,asy,asz,ajac); CHKERRQ(ierr);
-    return 0;
+    if (!local_pool_initialized) return {};
+    return {Axx_local, Ayy_local, Azz_local};
 }
 
 // ====================================================================
-// fillAllMetricMirrorOnGhost - 对指定面的 Ghost 层中的度量系数进行二阶镜像外推填充。
+// getLocalMetricVecs - 返回度量系数持久化 local Vec（10个）
 // ====================================================================
-PetscErrorCode Mesh::fillAllMetricMirrorOnGhost(int face)
+std::vector<Vec> Mesh::getLocalMetricVecs() const
 {
-    PetscErrorCode ierr;
-    DMDALocalInfo info;
-    PetscReal ***akx, ***aky, ***akz, ***aix, ***aiy, ***aiz, ***asx, ***asy, ***asz, ***ajac;
-    ierr = getLocalMetricArrays(akx,aky,akz,aix,aiy,aiz,asx,asy,asz,ajac,info); CHKERRQ(ierr);
-
-    PetscInt nxg=nx_global, nyg=ny_global, nzg=nz_global;
-    PetscInt gxs=info.gxs, gxe=info.gxs+info.gxm, gys=info.gys, gye=info.gys+info.gym, gzs=info.gzs, gze=info.gzs+info.gzm;
-    PetscInt i_lo=gxs,i_hi=gxe-1, j_lo=gys,j_hi=gye-1, k_lo=gzs,k_hi=gze-1;
-
-    switch(face){
-    case 0:i_hi=-1;     j_lo=0;j_hi=nyg-1; k_lo=0;k_hi=nzg-1; break;
-    case 1:i_lo=nxg;    j_lo=0;j_hi=nyg-1; k_lo=0;k_hi=nzg-1; break;
-    case 2:i_lo=0;i_hi=nxg-1; j_hi=-1;     k_lo=0;k_hi=nzg-1; break;
-    case 3:i_lo=0;i_hi=nxg-1; j_lo=nyg;    k_lo=0;k_hi=nzg-1; break;
-    case 4:i_lo=0;i_hi=nxg-1; j_lo=0;j_hi=nyg-1; k_hi=-1;     break;
-    case 5:i_lo=0;i_hi=nxg-1; j_lo=0;j_hi=nyg-1; k_lo=nzg;    break;
-    }
-    if(i_lo<gxs)i_lo=gxs; if(i_hi>gxe-1)i_hi=gxe-1;
-    if(j_lo<gys)j_lo=gys; if(j_hi>gye-1)j_hi=gye-1;
-    if(k_lo<gzs)k_lo=gzs; if(k_hi>gze-1)k_hi=gze-1;
-
-    if(i_lo<=i_hi && j_lo<=j_hi && k_lo<=k_hi){
-        for(PetscInt k=k_lo;k<=k_hi;++k){
-            for(PetscInt j=j_lo;j<=j_hi;++j){
-                for(PetscInt i=i_lo;i<=i_hi;++i){
-                    if(i>=0&&i<nxg && j>=0&&j<nyg && k>=0&&k<nzg) continue;
-
-                    PetscInt ib,jb,kb, im,jm,km;
-                    switch(face){
-                    case 0:ib=0;     jb=j;kb=k; im=-i;          jm=j;km=k; break;
-                    case 1:ib=nxg-1; jb=j;kb=k; im=2*(nxg-1)-i; jm=j;km=k; break;
-                    case 2:ib=i;jb=0;     kb=k; im=i;jm=-j;          km=k; break;
-                    case 3:ib=i;jb=nyg-1; kb=k; im=i;jm=2*(nyg-1)-j; km=k; break;
-                    case 4:ib=i;jb=j;kb=0;      im=i;jm=j;km=-k;          break;
-                    case 5:ib=i;jb=j;kb=nzg-1;  im=i;jm=j;km=2*(nzg-1)-k; break;
-                    }
-
-#define MIR(M) M[k][j][i] = 2.0*M[kb][jb][ib] - M[km][jm][im]
-                    MIR(akx);MIR(aky);MIR(akz);MIR(aix);MIR(aiy);MIR(aiz);
-                    MIR(asx);MIR(asy);MIR(asz);MIR(ajac);
-#undef MIR
-                }
-            }
-        }
-    }
-    ierr = restoreLocalMetricArrays(akx,aky,akz,aix,aiy,aiz,asx,asy,asz,ajac); CHKERRQ(ierr);
-    return 0;
+    if (!local_pool_initialized) return {};
+    return {Akx_local, Aky_local, Akz_local,
+            Aix_local, Aiy_local, Aiz_local,
+            Asx_local, Asy_local, Asz_local,
+            Ajac_local};
 }
-

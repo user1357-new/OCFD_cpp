@@ -5,14 +5,11 @@
 #include <petscdmda.h>
 #include <string>
 #include <vector>
+#include <functional>
 
 class Mesh;
 class MultiBlockMesh;
 
-/// @brief 虚网格填充器的抽象基类（策略模式）
-///
-/// 继承此类并实现 assignGhostOnFace()，即可为每个面赋值虚网格。
-/// 每个面可单独指定边界条件类型，也可统一处理。
 class GhostCellFiller
 {
 public:
@@ -28,21 +25,44 @@ public:
     GhostCellFiller(PetscInt lap) : lap_(lap) {}
     virtual ~GhostCellFiller() = default;
 
-    /// @brief 获取虚网格层数
     PetscInt getLap() const { return lap_; }
 
-    /// @brief 对网格块的单个 ghost 面执行填充（坐标 + 度量系数）
-    /// @param mesh      当前网格块
-    /// @param face      面编号（0~5），对应 FaceID
-    /// @param all_blocks 多块信息（单块时为 nullptr）
+    // ================ 核心虚函数（单个数组外推）================
+    virtual PetscErrorCode assignGhostOnFace(Mesh* mesh,
+                                             int face,
+                                             PetscReal*** arr,
+                                             const DMDALocalInfo& info,
+                                             MultiBlockMesh* all_blocks) = 0;
+
+    // ================ 面填充（默认填充 xyz，可重写）================
+    /// @brief 对网格块的单个 ghost 面执行填充（默认：坐标 x,y,z）
+    /// 派生类可重写，亦可显式调用 GhostCellFiller::fillGhostCellOnFace 复用坐标填充
     virtual PetscErrorCode fillGhostCellOnFace(Mesh* mesh, int face,
-                                                MultiBlockMesh* all_blocks = nullptr) = 0;
-    /// @brief 获取某个面的 ghost 区域索引范围（自动裁剪到当前 rank 拥有的范围）
-    /// @param face    面编号
-    /// @param LAP     虚网格层数
-    /// @param NX,NY,NZ 物理域尺寸
-    /// @param info    DMDALocalInfo，用于裁剪到当前 rank 的局部范围
-    /// @param i_min... 输出：该面 ghost 区域索引范围（已裁剪）
+                                                MultiBlockMesh* all_blocks = nullptr);
+
+    // ================ ★ 新增：批量填充任意数组 ★ ================
+    /// @brief 对一组已获取的数组指针统一做 ghost 外推（不负责获取/释放）
+    /// @param mesh      当前网格块
+    /// @param face      面编号
+    /// @param arrays    待填充的数组指针列表（如 {rho, u, v, w, p}）
+    /// @param info      DMDALocalInfo（与数组对应的）
+    /// @param all_blocks 多块信息
+    PetscErrorCode fillArraysOnFace(Mesh* mesh, int face,
+                                     const std::vector<PetscReal***>& arrays,
+                                     const DMDALocalInfo& info,
+                                     MultiBlockMesh* all_blocks = nullptr);
+
+    // ================ ★ 新增：用 Vec 列表批量填充 ★ ================
+    /// @brief 从 local Vec 列表获取数组 → 填充 ghost → 释放数组
+    /// @param mesh      当前网格块
+    /// @param face      面编号
+    /// @param localVecs 含 ghost 的 local Vec 列表
+    /// @param all_blocks 多块信息
+    PetscErrorCode fillGhostOnFaceFromVecs(Mesh* mesh, int face,
+                                            const std::vector<Vec>& localVecs,
+                                            MultiBlockMesh* all_blocks = nullptr);
+
+    // ================ 工具方法（不变）================
     static void GetGhostRange(int face, int LAP,
                               int NX, int NY, int NZ,
                               const DMDALocalInfo& info,
@@ -50,49 +70,23 @@ public:
                               int& j_min, int& j_max,
                               int& k_min, int& k_max);
 
-    /// @brief 导出 ghost 数据到 Tecplot（调试用）
     static PetscErrorCode ExportGhostToTecplot(Mesh* mesh,
                                                const std::string& base_filename);
-
-    /// @brief 返回该填充器的名称（用于调试输出）
     virtual const char* name() const = 0;
 
-    /// @brief 派生类实现此函数，对某个面的 ghost 区域赋值
-    /// @param mesh     当前网格块
-    /// @param face     面编号（0~5），对应 FaceID
-    /// @param arr      局部数组指针（3D，arr[k][j][i]）
-    /// @param info     DMDALocalInfo，包含索引范围信息
-    /// @param all_blocks 多块信息（单块时为 nullptr）
-    virtual PetscErrorCode assignGhostOnFace(Mesh* mesh,
-                                             int face,
-                                             PetscReal*** arr,
-                                             const DMDALocalInfo& info,
-                                             MultiBlockMesh* all_blocks) = 0;
-
-    PetscInt lap_;  // 虚网格层数
+protected:
+    PetscInt lap_;
 };
 
-// ====================================================================
-// 雅可比/坐标系数值的 Ghost Cell 填充（策略模式包装）
-// 等价 Fortran Jac_Ghost_Extent_1st 和 Jac_Ghost_Extent_2nd
-//
-// 根据 ghost_cell_face[face] 的值决定填充方式：
-//   0 = 不填充
-//   1 = 一阶外推（度量系数常数延拓 + 坐标线性外推）
-//   2 = 二阶外推（坐标镜像外推 + 重算雅可比系数）
-//
-// 流程：fillGhostCellOnFace 对 Axx/Ayy/Azz 和各度量系数逐个调 assignGhostOnFace 外推
-// ====================================================================
+// ================ JacGhostExtentBC 不变 ================
 class JacGhostExtentBC : public GhostCellFiller
 {
 public:
     JacGhostExtentBC(PetscInt gtype, PetscInt lap);
     const char* name() const override { return "JacGhostExtent"; }
 
-    /// @brief 重写 fillGhostCellOnFace，只填充指定面
     PetscErrorCode fillGhostCellOnFace(Mesh* mesh, int face,
                                         MultiBlockMesh* all_blocks = nullptr) override;
-    /// @brief 对单个数组做 ghost 外推（gtype=1 一阶线性，gtype=2 二阶镜像）
     PetscErrorCode assignGhostOnFace(Mesh* mesh,
                                      int face,
                                      PetscReal*** arr,
@@ -132,4 +126,4 @@ private:
     GhostCellFiller* face_bc_[6];
 };
 
-#endif // GHOST_CELL_FILER_H
+#endif // GHOST_CELL_FILLER_H

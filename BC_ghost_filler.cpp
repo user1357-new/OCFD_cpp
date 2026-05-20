@@ -15,19 +15,66 @@
 PetscErrorCode GhostCellFiller::fillGhostCellOnFace(Mesh* mesh, int face,
                                                      MultiBlockMesh* all_blocks)
 {
+    // 统一入口：取坐标 Vec → 填充 → 返回
+    return fillGhostOnFaceFromVecs(mesh, face,
+                                   mesh->getLocalCoordinateVecs(), all_blocks);
+}
+
+// ====================================================================
+// fillArraysOnFace - 对任意一组数组指针做 ghost 外推
+// 不负责获取/释放数组，调用者自己管理生命周期
+// ====================================================================
+PetscErrorCode GhostCellFiller::fillArraysOnFace(
+    Mesh* mesh, int face,
+    const std::vector<PetscReal***>& arrays,
+    const DMDALocalInfo& info,
+    MultiBlockMesh* all_blocks)
+{
     PetscErrorCode ierr;
     if (!mesh) return 0;
     if (face < 0 || face > 5) return 1;
 
+    for (size_t n = 0; n < arrays.size(); ++n) {
+        if (!arrays[n]) continue;  // 跳过空指针
+        ierr = assignGhostOnFace(mesh, face, arrays[n], info, all_blocks);
+        CHKERRQ(ierr);
+    }
+    return 0;
+}
+
+// ====================================================================
+// fillGhostOnFaceFromVecs - 从 local Vec 列表自动获取/释放
+// 典型用法：填充物理量 ghost（rho, u, v, w, p, T ...）
+// ====================================================================
+PetscErrorCode GhostCellFiller::fillGhostOnFaceFromVecs(
+    Mesh* mesh, int face,
+    const std::vector<Vec>& localVecs,
+    MultiBlockMesh* all_blocks)
+{
+    PetscErrorCode ierr;
+    if (!mesh) return 0;
+    if (face < 0 || face > 5) return 1;
+    if (localVecs.empty()) return 0;
+
+    DM da = mesh->getDM();
     DMDALocalInfo info;
-    PetscReal ***axx, ***ayy, ***azz;
-    ierr = mesh->getLocalCoordinateArrays(axx, ayy, azz, info); CHKERRQ(ierr);
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
 
-    ierr = assignGhostOnFace(mesh, face, axx, info, all_blocks); CHKERRQ(ierr);
-    ierr = assignGhostOnFace(mesh, face, ayy, info, all_blocks); CHKERRQ(ierr);
-    ierr = assignGhostOnFace(mesh, face, azz, info, all_blocks); CHKERRQ(ierr);
+    // 获取所有数组指针
+    std::vector<PetscReal***> arrays(localVecs.size(), nullptr);
+    for (size_t n = 0; n < localVecs.size(); ++n) {
+        if (localVecs[n] == nullptr) continue;
+        ierr = DMDAVecGetArray(da, localVecs[n], &arrays[n]); CHKERRQ(ierr);
+    }
 
-    ierr = mesh->restoreLocalCoordinateArrays(axx, ayy, azz); CHKERRQ(ierr);
+    // 批量填充
+    ierr = fillArraysOnFace(mesh, face, arrays, info, all_blocks); CHKERRQ(ierr);
+
+    // 释放所有数组指针
+    for (size_t n = 0; n < localVecs.size(); ++n) {
+        if (localVecs[n] == nullptr || arrays[n] == nullptr) continue;
+        ierr = DMDAVecRestoreArray(da, localVecs[n], &arrays[n]); CHKERRQ(ierr);
+    }
     return 0;
 }
 
@@ -56,22 +103,19 @@ PetscErrorCode JacGhostExtentBC::fillGhostCellOnFace(Mesh* mesh, int face,
     int gtype = ghost_cell_face_[face];
     if (gtype == 0) return 0;
 
-    // 基类模板方法：坐标外推
+    // 坐标：走基类（内部调 fillGhostOnFaceFromVecs）
     ierr = GhostCellFiller::fillGhostCellOnFace(mesh, face, all_blocks);
     CHKERRQ(ierr);
 
-    // 基类模板方法：度量系数外推
-    switch (gtype) {
-    case 1: ierr = mesh->fillAllMetricLinearOnGhost(face); break;
-    case 2: ierr = mesh->fillAllMetricMirrorOnGhost(face); break;
-    default: ierr = mesh->fillAllMetricConstOnGhost(face); break;
-    }
+    // 度量系数：走同一条路径（Vec → fillGhostOnFaceFromVecs → assignGhostOnFace）
+    ierr = fillGhostOnFaceFromVecs(mesh, face,
+                                   mesh->getLocalMetricVecs(), all_blocks);
     CHKERRQ(ierr);
     return 0;
 }
 
 // ====================================================================
-// assignGhostOnFace -对单个数组的单个面做 ghost 外推
+// 具体的 ghost 外推实现算法
 // gtype=1: 一阶线性外推
 // gtype=2: 二阶镜像外推
 // ====================================================================

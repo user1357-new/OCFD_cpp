@@ -130,11 +130,12 @@ public:
                                             PetscReal*** &aix, PetscReal*** &aiy, PetscReal*** &aiz,
                                             PetscReal*** &asx, PetscReal*** &asy, PetscReal*** &asz,
                                             PetscReal*** &ajac);
-    
-    /// @brief 对指定面所有度量系数做 ghost 常数延拓（基于持久化 local vector）
-    PetscErrorCode fillAllMetricConstOnGhost(int face);   // gtype=0 或不关心时用
-    PetscErrorCode fillAllMetricLinearOnGhost(int face);  // gtype=1：一阶线性外推
-    PetscErrorCode fillAllMetricMirrorOnGhost(int face);  // gtype=2：二阶镜像外推
+
+    // ---- 统一 ghost 填充入口：暴露持久化 local Vec ----
+    /// @brief 获取持久化坐标 local Vec 列表
+    std::vector<Vec> getLocalCoordinateVecs() const;
+    /// @brief 获取持久化度量系数 local Vec 列表（10个）
+    std::vector<Vec> getLocalMetricVecs() const;
 
     /// @brief 填充所有持久化数组的边角虚网格
     /// @param coord_gtype  坐标外推类型（1=线性, 2=镜像）
