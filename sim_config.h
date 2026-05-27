@@ -21,23 +21,27 @@ public:
     SimConfig(const std::string &input_file);
 
     const std::string& getGridFile()   const { return grid_file_; }
+    PetscInt           getGridFormat() const { return grid_format_; }
     PetscInt           getSchemeVis()  const { return scheme_vis_; }
     PetscInt           getLAP()        const { return LAP_; }
     PetscInt           getFaceGtype()  const { return face_gtype_; }
     PetscInt           getEdgeGtype()  const { return edge_gtype_; }
     PetscInt           getMetricGtype()const { return metric_gtype_; }
     const std::vector<std::array<PetscInt,3>>& getProcs() const { return procs_; }
+    bool               isProcsAuto()   const { return procs_auto_; }
 
     void print() const;
 
 private:
+    PetscInt grid_format_ = 1;
     std::string grid_file_   = "1.dat";
     PetscInt    scheme_vis_  = 8;
-    PetscInt    LAP_         = 0;      // 0=自动推导
+    PetscInt    LAP_         = 0;
     PetscInt    face_gtype_  = 2;
     PetscInt    edge_gtype_  = 2;
-    PetscInt    metric_gtype_= 0;      // 0=自动等于 face_gtype
+    PetscInt    metric_gtype_= 0;
     std::vector<std::array<PetscInt,3>> procs_;
+    bool procs_auto_ = false;
 
     void parse(const std::string &filename);
     void applyDefaults();

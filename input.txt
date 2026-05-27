@@ -2,12 +2,13 @@
 #  CFD 多块网格仿真配置
 # ============================================
 
-grid_file    = 1.dat          # Tecplot 网格文件
+grid_format  = 2              # 0=Plot3D二进制, 1=Tecplot ASCII(默认)，2=CGNS（二进制 HDF5/ADF）
+grid_file    = 1test.cgns         # 后缀是什么都行，.x / .xyz / .grd / .bin 都可以
 scheme_vis   = CD8            # 差分格式：CD6 或 CD8
 
 face_gtype   = 2              # 面 ghost 外推：1=一阶线性, 2=二阶镜像
 edge_gtype   = 2              # 边角 ghost 外推：1=一阶线性, 2=二阶镜像
 metric_gtype = 2              # 度量系数外推：1=一阶线性, 2=二阶镜像
 
-# 每个块的 MPI 进程分解 (npx, npy, npz)，用 | 分隔多个块
-procs        = 2,2,1 | 2,1,1 | 2,1,1 | 2,2,1 | 2,1,1 | 2,1,1
+# procs 自动分配（按网格点数比例 + 块内子域方正优化）分配cpu数量不要少于块数
+# 如需手动指定: procs = 2,2,1 | 2,1,1 | 2,1,1 | 2,2,1 | 2,1,1 | 2,1,1

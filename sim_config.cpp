@@ -38,6 +38,7 @@ void SimConfig::parse(const std::string &filename)
         std::string value = trim(line.substr(eq + 1));
 
         if      (key == "grid_file")    grid_file_    = value;
+        else if (key == "grid_format")  grid_format_ = toInt(value);
         else if (key == "scheme_vis")   scheme_vis_   = parseScheme(value);
         else if (key == "lap")          LAP_          = toInt(value);
         else if (key == "face_gtype")   face_gtype_   = toInt(value);
@@ -47,7 +48,7 @@ void SimConfig::parse(const std::string &filename)
     }
 
     if (procs_.empty())
-        throw std::runtime_error("procs line is required in input file");
+        procs_auto_ = true;
 }
 
 // ========== 自动填充默认值 ==========
@@ -116,16 +117,21 @@ std::string SimConfig::trim(const std::string &s)
 void SimConfig::print() const
 {
     std::string procs_str;
-    for (size_t i = 0; i < procs_.size(); ++i) {
-        if (i > 0) procs_str += " | ";
-        procs_str += std::to_string(procs_[i][0]) + ","
-                   + std::to_string(procs_[i][1]) + ","
-                   + std::to_string(procs_[i][2]);
+    if (procs_auto_) {
+        procs_str = "auto";
+    } else {
+        for (size_t i = 0; i < procs_.size(); ++i) {
+            if (i > 0) procs_str += " | ";
+            procs_str += std::to_string(procs_[i][0]) + ","
+                       + std::to_string(procs_[i][1]) + ","
+                       + std::to_string(procs_[i][2]);
+        }
     }
 
     PetscPrintf(PETSC_COMM_WORLD,
         "===== Simulation Config =====\n"
         "  grid_file    = %s\n"
+        "  grid_format  = %d (%s)\n"
         "  scheme_vis   = %d (CD%d)\n"
         "  LAP          = %d\n"
         "  face_gtype   = %d\n"
@@ -134,11 +140,12 @@ void SimConfig::print() const
         "  procs (%d blocks) = %s\n"
         "==============================\n",
         grid_file_.c_str(),
+        (int)grid_format_, (grid_format_ == 0 ? "Plot3D" : (grid_format_ == 2 ? "CGNS" : "Tecplot")),
         (int)scheme_vis_, (int)scheme_vis_,
         (int)LAP_,
         (int)face_gtype_,
         (int)edge_gtype_,
         (int)metric_gtype_,
-        (int)procs_.size(),
+        (int)(procs_auto_ ? 0 : procs_.size()),
         procs_str.c_str());
 }

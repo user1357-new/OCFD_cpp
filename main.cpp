@@ -10,7 +10,9 @@ int main(int argc, char **argv)
 {
     PetscInitialize(&argc, &argv, NULL, NULL);
     {
-        // 命令行: ./a.out [input.txt]，默认 input.txt
+        PetscMPIInt rank;
+        MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+
         std::string input_file = (argc >= 2) ? argv[1] : "input.txt";
 
         try {
@@ -18,7 +20,8 @@ int main(int argc, char **argv)
             cfg.print();
 
             MultiBlockMesh multiMesh(cfg.getProcs(), cfg.getLAP(), cfg.getSchemeVis());
-            multiMesh.Initialize(cfg.getGridFile());
+            multiMesh.Initialize(cfg.getGridFile(), cfg.getGridFormat());
+            multiMesh.printTopology();
 
             JacGhostExtentBC ghostFiller(cfg.getFaceGtype(), cfg.getLAP());
 
@@ -26,19 +29,14 @@ int main(int argc, char **argv)
                 Mesh* blk = multiMesh.getBlock(b);
                 if (!blk) continue;
 
-                // ① 面 ghost
                 for (int face = 0; face < 6; ++face)
-                    ghostFiller.fillGhostCellOnFace(blk, face, &multiMesh);
+                    ghostFiller.fillGhostCellOnFace(blk, face, b, &multiMesh);
 
-                // ② 边角 ghost（独立阶数）
                 blk->fillAllEdgeAndCornerGhost(cfg.getEdgeGtype(), cfg.getMetricGtype());
 
-                // ③ 导出
                 GhostCellFiller::ExportGhostToTecplot(blk, "ghost_block_" + std::to_string(b));
             }
 
-            PetscMPIInt rank;
-            MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
             if (rank == 0)
                 std::cout << "Ghost grid exported to ghost_block_*.dat" << std::endl;
 

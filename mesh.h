@@ -5,12 +5,13 @@
 #include <petscvec.h>
 #include <functional>
 
-// 网格类型常量
-const int GRID1D = 10;
-const int GRID2D_PLANE = 20;
-const int GRID2D_AXIAL_SYMM = 21;
-const int GRID3D = 30;
-const int GRID_AND_JACOBIAN3D = 31;
+// 网格类型常量（暂时没用）
+const int GRID1D           = 10;   //→  一维网格
+const int GRID2D_PLANE     = 20;   //→  二维平面网格
+const int GRID2D_AXIAL_SYMM= 21;   //→  二维轴对称网格
+const int GRID3D           = 30;   //→  三维网格（不计算雅可比）
+const int GRID_AND_JACOBIAN3D = 31; //→ 三维网格 + 雅可比
+
 
 // 数值格式常量
 const int OCFD_Scheme_CD6 = 6;
@@ -20,13 +21,11 @@ class Mesh {
 private:
     MPI_Comm comm; 
     DM da;
-    
+    PetscInt my_id;
     // 全局和局部网格尺寸
     PetscInt nx_global, ny_global, nz_global;
     PetscInt nx, ny, nz;
     
-    // MPI进程信息
-    PetscInt my_id;
     // 保留您规定的进程划分参数
     PetscInt npx0, npy0, npz0;
     
@@ -57,7 +56,7 @@ private:
     Vec Ajac_local;
     bool local_pool_initialized;  // 标记池是否已创建
     
-    // 边界条件处理函数指针（您自己实现）
+    // 边界条件处理函数指针（留空）
     std::function<void()> boundary_condition_handler;
     
     // 私有方法
@@ -67,7 +66,7 @@ private:
     void compute_derivative_x(PetscReal ***f, PetscReal ***df);
     void compute_derivative_y(PetscReal ***f, PetscReal ***df);
     void compute_derivative_z(PetscReal ***f, PetscReal ***df);
-    // MPI相关函数接口（留空给您实现）
+    // MPI相关函数接口（留空）
     void exchange_boundary_xyz(Vec &f);
     // ---- 统一持久化 local vector 池管理 ----
     /// @brief 创建所有 13 个 local vectors（仅首次调用生效）
@@ -139,7 +138,7 @@ public:
 
     /// @brief 填充所有持久化数组的边角虚网格
     /// @param coord_gtype  坐标外推类型（1=线性, 2=镜像）
-    /// @param metric_gtype 度量系数外推类型（1=线性, 2=镜像，通常 ≤ coord_gtype）
+    /// @param metric_gtype 度量系数外推类型（1=线性, 2=镜像）
     PetscErrorCode fillAllEdgeAndCornerGhost(int coord_gtype, int metric_gtype);
     
     /// @brief 检查持久化 local vector 池是否已初始化

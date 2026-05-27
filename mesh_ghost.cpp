@@ -49,12 +49,6 @@ static void fillEdgeCornerArray(
         return i >= 0 && i < nxg && j >= 0 && j < nyg && k >= 0 && k < nzg;
     };
 
-    auto clamp = [&](PetscInt v, PetscInt nmax) -> PetscInt {
-        if (v < 0) return 0;
-        if (v >= nmax) return nmax - 1;
-        return v;
-    };
-
     // ================ gtype=1: 一阶线性外推（与面一致）================
     if (gtype == 1) {
 

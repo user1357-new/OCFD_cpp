@@ -10,6 +10,21 @@
 class Mesh;
 class MultiBlockMesh;
 
+// ====================================================================
+// GhostCellFiller — 基类
+//
+// 职责分层：
+//   基类：Vec 遍历、GetArray/RestoreArray、ghost 范围计算
+//   派生类：具体填什么值（外推 / 抄数 / 将来物理量传输）
+//
+// 扩展路径（物理量传输）：
+//   1. MultiBlockMesh 中 DonorSlab 扩展物理量数组（rho, u, v, w, p...）
+//   2. Mesh 增加 getLocalConservativeVecs() / getLocalPrimitiveVecs()
+//   3. 调用 fillGhostOnFaceFromVecs 传入 block_id >= 0 进行抄数
+//   4. 派生类 assignGhostOnConnection 中根据 comp_idx 区分坐标/物理量：
+//        comp_idx 0-2   → 从 DonorSlab::x/y/z 抄
+//        comp_idx 3-N   → 从 DonorSlab::q[n] 抄（未来扩展）
+// ====================================================================
 class GhostCellFiller
 {
 public:
@@ -27,42 +42,38 @@ public:
 
     PetscInt getLap() const { return lap_; }
 
-    // ================ 核心虚函数（单个数组外推）================
+    // ==================== 派生类需实现 ====================
     virtual PetscErrorCode assignGhostOnFace(Mesh* mesh,
                                              int face,
                                              PetscReal*** arr,
                                              const DMDALocalInfo& info,
                                              MultiBlockMesh* all_blocks) = 0;
 
-    // ================ 面填充（默认填充 xyz，可重写）================
-    /// @brief 对网格块的单个 ghost 面执行填充（默认：坐标 x,y,z）
-    /// 派生类可重写，亦可显式调用 GhostCellFiller::fillGhostCellOnFace 复用坐标填充
+    /// @brief 块间连接抄数（virtual，默认 no-op）
+    virtual PetscErrorCode assignGhostOnConnection(Mesh* mesh,
+                                                   int block_id,
+                                                   int face,
+                                                   PetscReal*** arr,
+                                                   const DMDALocalInfo& info,
+                                                   MultiBlockMesh* all_blocks,
+                                                   int comp_idx);
+
+    // ==================== 唯一的 Vec 遍历器 ====================
+    /// @brief 对 Vec 列表逐个填充 ghost
+    /// @param block_id   -1（默认）= 外推，走 assignGhostOnFace
+    ///                   >=0 = 连接抄数，走 assignGhostOnConnection
+    /// @param comp_offset 抄数时的起始 comp_idx（仅 block_id>=0 时生效）
+    PetscErrorCode fillGhostOnFaceFromVecs(
+        Mesh* mesh, int face,
+        const std::vector<Vec>& localVecs,
+        MultiBlockMesh* all_blocks = nullptr,
+        int block_id = -1,
+        int comp_offset = 0);
+
+    // ==================== 原有接口（不改） ====================
     virtual PetscErrorCode fillGhostCellOnFace(Mesh* mesh, int face,
                                                 MultiBlockMesh* all_blocks = nullptr);
 
-    // ================ ★ 新增：批量填充任意数组 ★ ================
-    /// @brief 对一组已获取的数组指针统一做 ghost 外推（不负责获取/释放）
-    /// @param mesh      当前网格块
-    /// @param face      面编号
-    /// @param arrays    待填充的数组指针列表（如 {rho, u, v, w, p}）
-    /// @param info      DMDALocalInfo（与数组对应的）
-    /// @param all_blocks 多块信息
-    PetscErrorCode fillArraysOnFace(Mesh* mesh, int face,
-                                     const std::vector<PetscReal***>& arrays,
-                                     const DMDALocalInfo& info,
-                                     MultiBlockMesh* all_blocks = nullptr);
-
-    // ================ ★ 新增：用 Vec 列表批量填充 ★ ================
-    /// @brief 从 local Vec 列表获取数组 → 填充 ghost → 释放数组
-    /// @param mesh      当前网格块
-    /// @param face      面编号
-    /// @param localVecs 含 ghost 的 local Vec 列表
-    /// @param all_blocks 多块信息
-    PetscErrorCode fillGhostOnFaceFromVecs(Mesh* mesh, int face,
-                                            const std::vector<Vec>& localVecs,
-                                            MultiBlockMesh* all_blocks = nullptr);
-
-    // ================ 工具方法（不变）================
     static void GetGhostRange(int face, int LAP,
                               int NX, int NY, int NZ,
                               const DMDALocalInfo& info,
@@ -78,52 +89,36 @@ protected:
     PetscInt lap_;
 };
 
-// ================ JacGhostExtentBC 不变 ================
+// ==================== JacGhostExtentBC ====================
 class JacGhostExtentBC : public GhostCellFiller
 {
 public:
     JacGhostExtentBC(PetscInt gtype, PetscInt lap);
     const char* name() const override { return "JacGhostExtent"; }
 
-    PetscErrorCode fillGhostCellOnFace(Mesh* mesh, int face,
-                                        MultiBlockMesh* all_blocks = nullptr) override;
+    // 物理外推
     PetscErrorCode assignGhostOnFace(Mesh* mesh,
                                      int face,
                                      PetscReal*** arr,
                                      const DMDALocalInfo& info,
                                      MultiBlockMesh* all_blocks) override;
 
-public:
-    // ghost_cell_face_ getter（供外部查询填充类型）
+    // 块间连接抄数
+    PetscErrorCode assignGhostOnConnection(Mesh* mesh,
+                                           int block_id,
+                                           int face,
+                                           PetscReal*** arr,
+                                           const DMDALocalInfo& info,
+                                           MultiBlockMesh* all_blocks,
+                                           int comp_idx) override;
+
+    // 分流入口：度量外推 + 坐标分流（连接面抄数 / 物理面外推）
+    PetscErrorCode fillGhostCellOnFace(Mesh* mesh, int face, int block_id,
+                                       MultiBlockMesh* all_blocks = nullptr);
+
     PetscInt getGhostCellFace(int face) const { return ghost_cell_face_[face]; }
 
 private:
     PetscInt ghost_cell_face_[6];
 };
-
-// ====================================================================
-// 多面组合器：每个面用不同的边界条件
-// ====================================================================
-class CompositeBC : public GhostCellFiller
-{
-public:
-    CompositeBC(GhostCellFiller* left,   GhostCellFiller* right,
-                GhostCellFiller* bottom, GhostCellFiller* top,
-                GhostCellFiller* back,   GhostCellFiller* front)
-        : GhostCellFiller(left->getLap())
-        , face_bc_{left, right, bottom, top, back, front} {}
-
-    const char* name() const override { return "Composite"; }
-
-protected:
-    PetscErrorCode assignGhostOnFace(Mesh* mesh,
-                                     int face,
-                                     PetscReal*** arr,
-                                     const DMDALocalInfo& info,
-                                     MultiBlockMesh* all_blocks) override;
-
-private:
-    GhostCellFiller* face_bc_[6];
-};
-
-#endif // GHOST_CELL_FILLER_H
+#endif
