@@ -2,25 +2,26 @@
 PETSC_DIR ?= /home/v/PETSc/petsc-3.25.0
 PETSC_ARCH ?= arch-linux-c-debug
 
-# 只引入变量（不引入 rules，避免模式和我们的规则冲突）
 include $(PETSC_DIR)/lib/petsc/conf/variables
 
-# 编译器：由 PETSc variables 提供 CXX（通常是 mpicxx）
-# 编译标志：PETSC_CCPPFLAGS 包含所有 PETSc 头文件路径
-CXXFLAGS = -std=c++17 -O2 $(PETSC_CCPPFLAGS)
+# CGNS 配置（根据你的实际路径修改）
+CGNS_DIR ?= /usr/local/cgns
+CGNS_LIB  = -L$(CGNS_DIR)/lib -lcgns
+CGNS_INC  = -I$(CGNS_DIR)/include
+
+CXXFLAGS = -std=c++17 -O2 $(PETSC_CCPPFLAGS) $(CGNS_INC)
 
 TARGET = main
-SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp mesh_ghost.cpp BC_ghost_filler.cpp sim_config.cpp
+SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp \
+       mesh_ghost.cpp BC_ghost_filler.cpp BC_filler.cpp sim_config.cpp flow_init.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)
 
-# 链接：用 CXX 直接链接，加上 PETSc 库
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(PETSC_LIB)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(PETSC_LIB) $(CGNS_LIB)
 
-# 编译规则：每个 .cpp 依赖自己的 .h（mesh.h 是公共依赖）
-%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h sim_config.h
+%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h BC_filler.h sim_config.h flow_init.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: $(TARGET)

@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include "mesh_mutiblock.h"
+#include "BC_ghost_filler.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -593,29 +594,82 @@ void MultiBlockMesh::ParseCGNSFile(const std::string &filename,
                                              cgsize_t ni, cgsize_t nj, cgsize_t nk,
                                              int& face, cgsize_t out6[6]) -> bool
                         {
-                            // 格式A（CGNS C API）: [imin, jmin, kmin, imax, jmax, kmax]
-                            bool cgns_ok = (r[0]>=1 && r[0]<=ni && r[1]>=1 && r[1]<=nj &&
-                                            r[2]>=1 && r[2]<=nk && r[3]>=1 && r[3]<=ni &&
-                                            r[4]>=1 && r[4]<=nj && r[5]>=1 && r[5]<=nk);
-                            // 格式B（SIDS 文档序）: [imin, imax, jmin, jmax, kmin, kmax]
-                            bool sids_ok = (r[0]>=1 && r[0]<=ni && r[1]>=1 && r[1]<=ni &&
-                                            r[2]>=1 && r[2]<=nj && r[3]>=1 && r[3]<=nj &&
-                                            r[4]>=1 && r[4]<=nk && r[5]>=1 && r[5]<=nk);
+                            // cg_1to1_read 返回一个6元素扁平数组，来自 CGNS HDF5 的 2×3 矩阵。
+                            // HDF5 C-order 存储: [[imin,jmin,kmin],[imax,jmax,kmax]]
+                            // 扁平化为: [imin,jmin,kmin, imax,jmax,kmax]  (C API/ Fortran 序)
+                            //
+                            // 但有些连接的 donorrange 实际按 SIDS 序编码:
+                            //   [imin,imax, jmin,jmax, kmin,kmax]
+                            // 必须通过"哪个方向 min==max 且位于边界"来判定正确格式。
+                            //
+                            // 策略：两种格式分开检测，选恰好给出1个有效面法向的那个；
+                            //      如果都给出1个，选面法向值为1或NI/NJ/NK（域边界）的那个；
+                            //      仍然无法区分则优先 C API 格式。
 
-                            // ★ 优先 CGNS C API 格式（这是 cg_1to1_read 实际返回的）
+                            auto isFaceAt = [](cgsize_t a, cgsize_t b, cgsize_t N) -> int {
+                                // 返回 1=MIN面, 2=MAX面, 0=不是面法向
+                                if (a == b) {
+                                    if (a == 1)            return 1;  // MIN
+                                    if (a == (cgsize_t)N) return 2;  // MAX
+                                }
+                                return 0;
+                            };
+
+                            // C API 格式: [imin,jmin,kmin, imax,jmax,kmax]
+                            int ci = isFaceAt(r[0], r[3], ni);
+                            int cj = isFaceAt(r[1], r[4], nj);
+                            int ck = isFaceAt(r[2], r[5], nk);
+                            int capi_nf = (ci>0) + (cj>0) + (ck>0);
+                            int capi_face_dir = ci ? 0 : (cj ? 1 : (ck ? 2 : -1));
+
+                            // SIDS 格式: [imin,imax, jmin,jmax, kmin,kmax]
+                            int si = isFaceAt(r[0], r[1], ni);
+                            int sj = isFaceAt(r[2], r[3], nj);
+                            int sk = isFaceAt(r[4], r[5], nk);
+                            int sids_nf = (si>0) + (sj>0) + (sk>0);
+                            int sids_face_dir = si ? 0 : (sj ? 1 : (sk ? 2 : -1));
+
                             cgsize_t imin, imax, jmin, jmax, kmin, kmax;
-                            if (cgns_ok) {
-                                imin=r[0]; imax=r[3]; jmin=r[1]; jmax=r[4]; kmin=r[2]; kmax=r[5];
-                            } else if (sids_ok) {
-                                imin=r[0]; imax=r[1]; jmin=r[2]; jmax=r[3]; kmin=r[4]; kmax=r[5];
+                            bool use_capi;
+
+                            if (capi_nf == 1 && sids_nf != 1) {
+                                use_capi = true;
+                            } else if (sids_nf == 1 && capi_nf != 1) {
+                                use_capi = false;
+                            } else if (capi_nf == 1 && sids_nf == 1) {
+                                // 两种格式都恰好给出1个面法向，但可能检测出不同的面方向
+                                // 优选面法向值在域边界(1或N)的那个格式
+                                if (capi_face_dir == sids_face_dir) {
+                                    use_capi = true;  // 同方向，优先 C API
+                                } else {
+                                    // 选面法向值明确在边界(1或N)的格式
+                                    // 两个都应在边界上，但如果一个不是(返回0)则排除
+                                    use_capi = true;  // 默认 C API
+                                }
                             } else {
-                                return false;
+                                // 回退：范围检查
+                                bool cgns_ok = (r[0]>=1 && r[0]<=ni && r[1]>=1 && r[1]<=nj &&
+                                                r[2]>=1 && r[2]<=nk && r[3]>=1 && r[3]<=ni &&
+                                                r[4]>=1 && r[4]<=nj && r[5]>=1 && r[5]<=nk);
+                                bool sids_ok_ = (r[0]>=1 && r[0]<=ni && r[1]>=1 && r[1]<=ni &&
+                                                r[2]>=1 && r[2]<=nj && r[3]>=1 && r[3]<=nj &&
+                                                r[4]>=1 && r[4]<=nk && r[5]>=1 && r[5]<=nk);
+                                if (cgns_ok) { use_capi = true; }
+                                else if (sids_ok_) { use_capi = false; }
+                                else return false;
+                            }
+
+                            if (use_capi) {
+                                imin=r[0]; imax=r[3]; jmin=r[1]; jmax=r[4]; kmin=r[2]; kmax=r[5];
+                            } else {
+                                imin=r[0]; imax=r[1]; jmin=r[2]; jmax=r[3]; kmin=r[4]; kmax=r[5];
                             }
 
                             if (imin>imax) { auto t=imin; imin=imax; imax=t; }
                             if (jmin>jmax) { auto t=jmin; jmin=jmax; jmax=t; }
                             if (kmin>kmax) { auto t=kmin; kmin=kmax; kmax=t; }
 
+                            // ★ 1-based 顶点 → 0-based
                             out6[0]=imin-1; out6[1]=imax-1;
                             out6[2]=jmin-1; out6[3]=jmax-1;
                             out6[4]=kmin-1; out6[5]=kmax-1;
@@ -624,6 +678,19 @@ void MultiBlockMesh::ParseCGNSFile(const std::string &filename,
                             else if (jmin == jmax) face = (jmin == 1) ? 2 : 3;
                             else if (kmin == kmax) face = (kmin == 1) ? 4 : 5;
                             else                  face = -1;
+
+                            // ★ 0-based 顶点范围 → 0-based 格心范围
+                            //   面法向：max 面（right/top/front）需 -1
+                            //   非面法向：max 始终 -1（顶点 jmax 对应格心 jmax-1）
+                            if (face >= 0) {
+                                if      (face == 1) { out6[0]--; out6[1]--; }  // right  → cell ni-2
+                                else if (face == 3) { out6[2]--; out6[3]--; }  // top    → cell nj-2
+                                else if (face == 5) { out6[4]--; out6[5]--; }  // front  → cell nk-2
+
+                                if      (face <= 1) { out6[3]--; out6[5]--; }  // i-face: jmax,kmax→cell
+                                else if (face <= 3) { out6[1]--; out6[5]--; }  // j-face: imax,kmax→cell
+                                else                 { out6[1]--; out6[3]--; }  // k-face: imax,jmax→cell
+                            }
                             return true;
                         };
 
@@ -669,8 +736,10 @@ void MultiBlockMesh::ParseCGNSFile(const std::string &filename,
 
 // 构造函数：初始化成员变量
 MultiBlockMesh::MultiBlockMesh(const std::vector<std::array<PetscInt,3>> &procs,
-                               PetscInt lap, PetscInt scheme_vis)
-    : block_procs_(procs), LAP(lap), scheme_vis(scheme_vis)
+                               PetscInt lap, PetscInt scheme_vis,
+                               PetscInt metric_diff_type)
+    : block_procs_(procs), LAP(lap), scheme_vis(scheme_vis),
+      metric_diff_type_(metric_diff_type)
 {}
 // ====================================================================
 // autoAllocateProcs — 两级自动进程分配
@@ -772,14 +841,14 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename,
     PetscInt num_blocks = static_cast<PetscInt>(infos.size());
     MPI_Bcast(&num_blocks, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
 
-    // 自动分配：如果 block_procs_ 为空，则根据网格尺寸自动计算进程分布
+    // 自动分配：如果 block_procs_ 为空，则根据格心维度自动计算进程分布
     if (block_procs_.empty()) {
         std::vector<PetscInt> bdims(num_blocks * 3);
         if (rank == 0) {
             for (PetscInt i = 0; i < num_blocks; ++i) {
-                bdims[3*i]   = infos[i].ni;
-                bdims[3*i+1] = infos[i].nj;
-                bdims[3*i+2] = infos[i].nk;
+                bdims[3*i]   = infos[i].ni - 1;  // 格心维度 = 顶点维度 - 1
+                bdims[3*i+1] = infos[i].nj - 1;
+                bdims[3*i+2] = infos[i].nk - 1;
             }
         }
         MPI_Bcast(bdims.data(), 3 * num_blocks, MPIU_INT, 0, PETSC_COMM_WORLD);
@@ -821,14 +890,15 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename,
     // ---------- 3. 确定本进程所属块 ----------
     PetscInt my_block = -1;
     PetscInt offset = 0;
-    std::vector<PetscInt> block_start_rank(num_blocks);
+    block_start_rank_.resize(num_blocks);        // ★ 保存为成员
     for (PetscInt b = 0; b < num_blocks; ++b) {
-        block_start_rank[b] = offset;
+        block_start_rank_[b] = offset;
         if (rank >= offset && rank < offset + block_nprocs[b]) {
             my_block = b;
         }
         offset += block_nprocs[b];
     }
+    const auto& block_start_rank = block_start_rank_;  // 局部引用，兼容后续代码
 
     // ---------- 4. 创建子通信域 ----------
     block_comms_.resize(num_blocks, MPI_COMM_NULL);
@@ -964,7 +1034,7 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename,
     full_coords_.resize(num_blocks);          // ★ 方案B: 预分配
 
     for (PetscInt b = 0; b < num_blocks; ++b) {
-        PetscInt ni = dims[3*b];
+               PetscInt ni = dims[3*b];
         PetscInt nj = dims[3*b+1];
         PetscInt nk = dims[3*b+2];
         PetscInt npts = ni * nj * nk;
@@ -988,27 +1058,56 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename,
             MPI_Bcast(y.data(), npts, MPI_DOUBLE, 0, block_comms_[b]);
             MPI_Bcast(z.data(), npts, MPI_DOUBLE, 0, block_comms_[b]);
 
+            // ★ 8 点平均：顶点 → 格心
+            PetscInt ni_c = ni - 1, nj_c = nj - 1, nk_c = nk - 1;
+            PetscInt npts_c = ni_c * nj_c * nk_c;
+            std::vector<PetscReal> xc(npts_c), yc(npts_c), zc(npts_c);
+
+            for (PetscInt k = 0; k < nk_c; ++k)
+                for (PetscInt j = 0; j < nj_c; ++j)
+                    for (PetscInt i = 0; i < ni_c; ++i) {
+                        PetscInt idx_c = (k * nj_c + j) * ni_c + i;
+                        PetscReal xv=0,yv=0,zv=0;
+                        for (int dk=0; dk<=1; dk++)
+                            for (int dj=0; dj<=1; dj++)
+                                for (int di=0; di<=1; di++) {
+                                    PetscInt idx_v = ((k+dk)*nj + (j+dj))*ni + (i+di);
+                                    xv += x[idx_v]; yv += y[idx_v]; zv += z[idx_v];
+                                }
+                        xc[idx_c] = xv * 0.125;
+                        yc[idx_c] = yv * 0.125;
+                        zc[idx_c] = zv * 0.125;
+                    }
+
             PetscInt my_rank_block;
             MPI_Comm_rank(block_comms_[b], &my_rank_block);
 
             auto mesh_ptr = std::make_unique<Mesh>(
-                ni, nj, nk,
+                ni_c, nj_c, nk_c,
                 my_rank_block,
                 block_procs_[b][0], block_procs_[b][1], block_procs_[b][2],
-                LAP, GRID3D, scheme_vis,
+                LAP, GRID3D, scheme_vis, metric_diff_type_,
                 block_comms_[b]
             );
-            mesh_ptr->InitializeFromCoordinates(x, y, z);
+            mesh_ptr->InitializeFromCoordinates(xc, yc, zc);
             blocks_.push_back(std::move(mesh_ptr));
 
-            // ★ 方案B: 保存完整坐标（供 slab 打包使用）
             full_coords_[b].valid = true;
-            full_coords_[b].ni = ni;
-            full_coords_[b].nj = nj;
-            full_coords_[b].nk = nk;
-            full_coords_[b].x = x;
-            full_coords_[b].y = y;
-            full_coords_[b].z = z;
+            full_coords_[b].ni = ni_c;
+            full_coords_[b].nj = nj_c;
+            full_coords_[b].nk = nk_c;
+            full_coords_[b].x = std::move(xc);
+            full_coords_[b].y = std::move(yc);
+            full_coords_[b].z = std::move(zc);
+
+            // ★ 保存原始格点坐标，输出时直接使用
+            full_coords_[b].node_ni = ni;
+            full_coords_[b].node_nj = nj;
+            full_coords_[b].node_nk = nk;
+            full_coords_[b].node_x = x;
+            full_coords_[b].node_y = y;
+            full_coords_[b].node_z = z;
+
         } else {
             blocks_.push_back(nullptr);
         }
@@ -1018,114 +1117,1048 @@ void MultiBlockMesh::Initialize(const std::string &tecplot_filename,
     exchangeDonorSlabs(block_start_rank);
     MPI_Barrier(PETSC_COMM_WORLD);
 }
-// 导出到 Tecplot(dat格式)
-PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
+// ====================================================================
+// interpolateCellToNode — 距离反比加权：格心 → 格点
+// 对每个格点，找周围最多 8 个格心，按 1/distance 加权平均
+// ====================================================================
+static void interpolateCellToNode(
+    const std::vector<PetscReal> &cell_x,
+    const std::vector<PetscReal> &cell_y,
+    const std::vector<PetscReal> &cell_z,
+    const std::vector<PetscReal> &cell_vals,  // nxc*nyc*nzc * nvar
+    int nvar,
+    PetscInt nxc, PetscInt nyc, PetscInt nzc,
+    const std::vector<PetscReal> &node_x,
+    const std::vector<PetscReal> &node_y,
+    const std::vector<PetscReal> &node_z,
+    PetscInt nxv, PetscInt nyv, PetscInt nzv,
+    std::vector<PetscReal> &node_vals)        // 输出: nxv*nyv*nzv * nvar
 {
-    PetscErrorCode ierr;
-    PetscMPIInt rank, size;
-    MPI_Comm_rank(comm, &rank);
-    MPI_Comm_size(comm, &size);
+    PetscInt total_v = nxv * nyv * nzv;
+    node_vals.assign(total_v * nvar, 0.0);
+    std::vector<PetscReal> weights(total_v, 0.0);
 
-    DMDALocalInfo info;
-    PetscReal ***axx, ***ayy, ***azz;
-    PetscReal ***akx, ***aky, ***akz;
-    PetscReal ***aix, ***aiy, ***aiz;
-    PetscReal ***asx, ***asy, ***asz;
-    PetscReal ***ajac;
-    PetscReal ***akx1, ***aky1, ***akz1;
-    PetscReal ***aix1, ***aiy1, ***aiz1;
-    PetscReal ***asx1, ***asy1, ***asz1;
+    for (PetscInt kv = 0; kv < nzv; ++kv) {
+        for (PetscInt jv = 0; jv < nyv; ++jv) {
+            for (PetscInt iv = 0; iv < nxv; ++iv) {
+                PetscInt idx_v = (kv * nyv + jv) * nxv + iv;
+                PetscReal nx = node_x[idx_v];
+                PetscReal ny = node_y[idx_v];
+                PetscReal nz = node_z[idx_v];
 
-    ierr = GetLocalArrays(axx, ayy, azz, akx, aky, akz,
-                          aix, aiy, aiz, asx, asy, asz, ajac,
-                          akx1, aky1, akz1, aix1, aiy1, aiz1,
-                          asx1, asy1, asz1, info);
-    CHKERRQ(ierr);
+                // 格点 (iv,jv,kv) 周围格心范围: [iv-1,iv] × [jv-1,jv] × [kv-1,kv]
+                for (int dk = -1; dk <= 0; ++dk) {
+                    PetscInt kc = kv + dk;
+                    if (kc < 0 || kc >= nzc) continue;
+                    for (int dj = -1; dj <= 0; ++dj) {
+                        PetscInt jc = jv + dj;
+                        if (jc < 0 || jc >= nyc) continue;
+                        for (int di = -1; di <= 0; ++di) {
+                            PetscInt ic = iv + di;
+                            if (ic < 0 || ic >= nxc) continue;
 
-    PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
-    PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
+                            PetscInt idx_c = (kc * nyc + jc) * nxc + ic;
+                            PetscReal dx = cell_x[idx_c] - nx;
+                            PetscReal dy = cell_y[idx_c] - ny;
+                            PetscReal dz = cell_z[idx_c] - nz;
+                            PetscReal dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                            // 防止角点节点与格心重合时除以零
+                            if (dist < 1e-30) dist = 1e-30;
+                            PetscReal w = 1.0 / dist;
 
-    // 全局尺寸
-    PetscInt nx = nx_global, ny = ny_global, nz = nz_global;
-    PetscInt global_size = nx * ny * nz;   // 总网格点数
-
-    // 每个进程分配一个全局大小的数组（存放 6 个变量），初始为 0.0
-    std::vector<PetscReal> X_global(global_size, 0.0);
-    std::vector<PetscReal> Y_global(global_size, 0.0);
-    std::vector<PetscReal> Z_global(global_size, 0.0);
-    std::vector<PetscReal> Akx_global(global_size, 0.0);
-    std::vector<PetscReal> Akx1_global(global_size, 0.0);
-    std::vector<PetscReal> Axx_global(global_size, 0.0);
-
-    // 填充本进程拥有的点
-    // Tecplot 顺序：I 变化最快，J 次之，K 最慢，
-    // 线性索引：i + j*nx + k*nx*ny
-    for (PetscInt k = zs; k < zs + zm; k++) {
-        for (PetscInt j = ys; j < ys + ym; j++) {
-            for (PetscInt i = xs; i < xs + xm; i++) {
-                PetscInt idx = i + j * nx + k * nx * ny;   // IJK 顺序
-                X_global[idx]    = axx[k][j][i];
-                Y_global[idx]    = ayy[k][j][i];
-                Z_global[idx]    = azz[k][j][i];
-                Akx_global[idx]  = akx[k][j][i];
-                Akx1_global[idx] = akx1[k][j][i];
-                Axx_global[idx]  = axx[k][j][i];
+                            for (int c = 0; c < nvar; ++c)
+                                node_vals[idx_v * nvar + c] += cell_vals[idx_c * nvar + c] * w;
+                            weights[idx_v] += w;
+                        }
+                    }
+                }
             }
         }
     }
 
-    // 汇总到 rank 0（求和，因为每个点只有一个进程有非零值）
-    std::vector<PetscReal> X_recv, Y_recv, Z_recv, Akx_recv, Akx1_recv, Axx_recv;
+    // 归一化
+    for (PetscInt i = 0; i < total_v; ++i) {
+        if (weights[i] > 0.0) {
+            PetscReal inv = 1.0 / weights[i];
+            for (int c = 0; c < nvar; ++c)
+                node_vals[i * nvar + c] *= inv;
+        }
+    }
+}
+// ====================================================================
+// fixEdgeCornerNodes — 用已算对的面内部格点修正棱角格点
+// 两步：先修棱（2 个方向在边界），再修角（3 个方向在边界）
+// ====================================================================
+static void fixEdgeCornerNodes(
+    std::vector<PetscReal> &node_vals,  // nxv*nyv*nzv * nvar
+    int nvar,
+    PetscInt nxv, PetscInt nyv, PetscInt nzv)
+{
+    PetscInt total_v = nxv * nyv * nzv;
+
+    auto ref = [&](PetscInt iv, PetscInt jv, PetscInt kv, int dir) -> PetscInt {
+        // 沿 dir 方向从边界向内走一步
+        if (dir == 0) return iv == 0 ? (PetscInt)1 : (PetscInt)(nxv - 2);
+        if (dir == 1) return jv == 0 ? (PetscInt)1 : (PetscInt)(nyv - 2);
+        return kv == 0 ? (PetscInt)1 : (PetscInt)(nzv - 2);
+    };
+
+    // 第一遍：修棱（2 个方向在边界）
+    std::vector<PetscReal> fixed = node_vals;
+    for (PetscInt kv = 0; kv < nzv; ++kv)
+        for (PetscInt jv = 0; jv < nyv; ++jv)
+            for (PetscInt iv = 0; iv < nxv; ++iv) {
+                bool b_i = (iv == 0 || iv == nxv - 1);
+                bool b_j = (jv == 0 || jv == nyv - 1);
+                bool b_k = (kv == 0 || kv == nzv - 1);
+                int nb = (int)b_i + (int)b_j + (int)b_k;
+                if (nb != 2) continue;  // 只处理棱
+
+                PetscInt idx_v = (kv * nyv + jv) * nxv + iv;
+                for (int c = 0; c < nvar; ++c) fixed[idx_v * nvar + c] = 0.0;
+                PetscReal cnt = 0;
+
+                if (b_i) {
+                    PetscInt iv_r = ref(iv, jv, kv, 0);
+                    PetscInt ir = (kv * nyv + jv) * nxv + iv_r;
+                    for (int c = 0; c < nvar; ++c) fixed[idx_v * nvar + c] += fixed[ir * nvar + c];
+                    cnt += 1;
+                }
+                if (b_j) {
+                    PetscInt jv_r = ref(iv, jv, kv, 1);
+                    PetscInt jr = (kv * nyv + jv_r) * nxv + iv;
+                    for (int c = 0; c < nvar; ++c) fixed[idx_v * nvar + c] += fixed[jr * nvar + c];
+                    cnt += 1;
+                }
+                if (b_k) {
+                    PetscInt kv_r = ref(iv, jv, kv, 2);
+                    PetscInt kr = (kv_r * nyv + jv) * nxv + iv;
+                    for (int c = 0; c < nvar; ++c) fixed[idx_v * nvar + c] += fixed[kr * nvar + c];
+                    cnt += 1;
+                }
+                PetscReal inv = 1.0 / cnt;
+                for (int c = 0; c < nvar; ++c) fixed[idx_v * nvar + c] *= inv;
+            }
+
+    // 第二遍：修角（3 个方向在边界），引用已修正的棱
+    for (PetscInt kv = 0; kv < nzv; ++kv)
+        for (PetscInt jv = 0; jv < nyv; ++jv)
+            for (PetscInt iv = 0; iv < nxv; ++iv) {
+                bool b_i = (iv == 0 || iv == nxv - 1);
+                bool b_j = (jv == 0 || jv == nyv - 1);
+                bool b_k = (kv == 0 || kv == nzv - 1);
+                if (!b_i || !b_j || !b_k) continue;  // 只处理角
+
+                PetscInt idx_v = (kv * nyv + jv) * nxv + iv;
+                PetscInt iv_r = ref(iv, jv, kv, 0);
+                PetscInt jv_r = ref(iv, jv, kv, 1);
+                PetscInt kv_r = ref(iv, jv, kv, 2);
+                PetscInt ir = (kv * nyv + jv) * nxv + iv_r;
+                PetscInt jr = (kv * nyv + jv_r) * nxv + iv;
+                PetscInt kr = (kv_r * nyv + jv) * nxv + iv;
+
+                for (int c = 0; c < nvar; ++c)
+                    fixed[idx_v * nvar + c] = (fixed[ir * nvar + c] + fixed[jr * nvar + c] + fixed[kr * nvar + c]) / 3.0;
+            }
+
+    node_vals = std::move(fixed);
+}
+// ====================================================================
+// ExportToTecplot — 导出格心坐标（格心 DMDA 数据，nx_global×ny_global×nz_global 点）
+// ====================================================================
+PetscErrorCode Mesh::ExportToTecplot(const std::string &filename)
+{
+    PetscErrorCode ierr;
+    PetscMPIInt rank;
+    MPI_Comm_rank(comm, &rank);
+
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+
+    PetscReal ***axx, ***ayy, ***azz;
+    ierr = DMDAVecGetArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz, &azz); CHKERRQ(ierr);
+
+    PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
+    PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
+    PetscInt nx = nx_global, ny = ny_global, nz = nz_global;
+    PetscInt global_size = nx * ny * nz;
+
+    std::vector<PetscReal> X_global(global_size, 0.0);
+    std::vector<PetscReal> Y_global(global_size, 0.0);
+    std::vector<PetscReal> Z_global(global_size, 0.0);
+
+    for (PetscInt k = zs; k < zs + zm; k++)
+        for (PetscInt j = ys; j < ys + ym; j++)
+            for (PetscInt i = xs; i < xs + xm; i++) {
+                PetscInt idx = i + j * nx + k * nx * ny;
+                X_global[idx] = axx[k][j][i];
+                Y_global[idx] = ayy[k][j][i];
+                Z_global[idx] = azz[k][j][i];
+            }
+
+    std::vector<PetscReal> X_recv, Y_recv, Z_recv;
     if (rank == 0) {
         X_recv.resize(global_size);
         Y_recv.resize(global_size);
         Z_recv.resize(global_size);
-        Akx_recv.resize(global_size);
-        Akx1_recv.resize(global_size);
-        Axx_recv.resize(global_size);
     }
-
     MPI_Reduce(X_global.data(), X_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
     MPI_Reduce(Y_global.data(), Y_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
     MPI_Reduce(Z_global.data(), Z_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
-    MPI_Reduce(Akx_global.data(), Akx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
-    MPI_Reduce(Akx1_global.data(), Akx1_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
-    MPI_Reduce(Axx_global.data(), Axx_recv.data(), global_size, MPI_DOUBLE, MPI_SUM, 0, comm);
 
-    // rank 0 按 Tecplot 顺序写出
     if (rank == 0) {
         std::string outname = filename + ".dat";
         std::ofstream outfile(outname);
-        if (!outfile.is_open()) {
-            SETERRQ(PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN, "Cannot open output file");
-        }
-
-        outfile << "TITLE = \"Mesh and Jacobian Data\"" << std::endl;
-        outfile << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\", \"Akx1\", \"Axx\"" << std::endl;
-        outfile << "ZONE T=\"Full Grid\", I=" << nx
-                << ", J=" << ny << ", K=" << nz << ", F=POINT" << std::endl;
-
+        outfile << "TITLE = \"Cell Center Coords\"\n"
+                << "VARIABLES = \"X\", \"Y\", \"Z\"\n"
+                << "ZONE T=\"Full Grid\", I=" << nx
+                << ", J=" << ny << ", K=" << nz << ", F=POINT\n";
         outfile.precision(8);
         outfile << std::scientific;
-        for (PetscInt idx = 0; idx < global_size; idx++) {
-            outfile << X_recv[idx]    << " "
-                    << Y_recv[idx]    << " "
-                    << Z_recv[idx]    << " "
-                    << Akx_recv[idx]  << " "
-                    << Akx1_recv[idx] << " "
-                    << Axx_recv[idx]  << std::endl;
-        }
+        for (PetscInt idx = 0; idx < global_size; idx++)
+            outfile << X_recv[idx] << " "
+                    << Y_recv[idx] << " "
+                    << Z_recv[idx] << "\n";
         outfile.close();
-        PetscPrintf(comm, "Data exported to %s\n", outname.c_str());
     }
 
-    ierr = RestoreLocalArrays(axx, ayy, azz, akx, aky, akz,
-                              aix, aiy, aiz, asx, asy, asz, ajac,
-                              akx1, aky1, akz1, aix1, aiy1, aiz1,
-                              asx1, asy1, asz1);
-    CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz, &azz); CHKERRQ(ierr);
+    return 0;
+}
+PetscErrorCode Mesh::ExportCellToTecplot(const std::string &filename)
+{
+    PetscErrorCode ierr;
+    PetscMPIInt rank;
+    MPI_Comm_rank(comm, &rank);
+
+    if (!cell_pool_initialized) {
+        PetscPrintf(comm, "[ExportCell] cell pool not ready.\n");
+        return 0;
+    }
+
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+
+    PetscReal ***axx, ***ayy, ***azz, ***akx;
+    ierr = DMDAVecGetArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Akx, &akx); CHKERRQ(ierr);
+
+    PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
+    PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
+    PetscInt nx = nx_global, ny = ny_global, nz = nz_global;
+    PetscInt total = nx * ny * nz;
+
+    std::vector<PetscReal> buf(total * 4, 0.0);
+    for (PetscInt k = zs; k < zs + zm; k++)
+        for (PetscInt j = ys; j < ys + ym; j++)
+            for (PetscInt i = xs; i < xs + xm; i++) {
+                PetscInt p = (i + j * nx + k * nx * ny) * 4;
+                buf[p+0] = axx[k][j][i];
+                buf[p+1] = ayy[k][j][i];
+                buf[p+2] = azz[k][j][i];
+                buf[p+3] = akx[k][j][i];
+            }
+
+    std::vector<PetscReal> recv;
+    if (rank == 0) recv.resize(total * 4);
+    MPI_Reduce(buf.data(), recv.data(), total * 4, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+    ierr = DMDAVecRestoreArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Akx, &akx); CHKERRQ(ierr);
+
+    if (rank == 0) {
+        std::string outname = filename + ".dat";
+        std::ofstream f(outname);
+        f << "TITLE = \"Cell Data\"\n"
+          << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\"\n"
+          << "ZONE T=\"Cell\", I=" << nx << ", J=" << ny << ", K=" << nz << ", F=POINT\n";
+        f.precision(8);
+        f << std::scientific;
+        for (PetscInt i = 0; i < total; i++) {
+            PetscInt p = i * 4;
+            f << recv[p] << " " << recv[p+1] << " " << recv[p+2] << " " << recv[p+3] << "\n";
+        }
+        f.close();
+        PetscPrintf(comm, "[ExportCell] %s\n", outname.c_str());
+    }
+    return 0;
+}
+PetscErrorCode Mesh::ExportCellGhostToTecplot(const std::string &filename)
+{
+    PetscErrorCode ierr;
+    PetscMPIInt rank;
+    MPI_Comm_rank(comm, &rank);
+
+    if (!cell_pool_initialized) {
+        PetscPrintf(comm, "[ExportCellGhost] cell pool not ready.\n");
+        return 0;
+    }
+
+    const int NVAR = 4;  // X, Y, Z, Akx
+
+    PetscInt nxg = nx_global;
+    PetscInt nyg = ny_global;
+    PetscInt nzg = nz_global;
+    PetscInt GI = nxg + 2 * LAP;
+    PetscInt GJ = nyg + 2 * LAP;
+    PetscInt GK = nzg + 2 * LAP;
+
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+
+    PetscReal ***axx, ***ayy, ***azz, ***akx;
+    ierr = DMDAVecGetArray(da, Axx_local, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy_local, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz_local, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Akx_local, &akx); CHKERRQ(ierr);
+
+    PetscInt send_sz[3] = {info.gxm, info.gym, info.gzm};
+    PetscInt send_off[3] = {info.gxs, info.gys, info.gzs};
+
+    int nprocs;
+    MPI_Comm_size(comm, &nprocs);
+    PetscInt *all_sz = nullptr, *all_off = nullptr;
+    if (rank == 0) {
+        all_sz  = new PetscInt[nprocs * 3];
+        all_off = new PetscInt[nprocs * 3];
+    }
+    MPI_Gather(send_sz,  3, MPI_INT, all_sz,  3, MPI_INT, 0, comm);
+    MPI_Gather(send_off, 3, MPI_INT, all_off, 3, MPI_INT, 0, comm);
+
+    PetscInt nlocal = info.gxm * info.gym * info.gzm;
+    PetscReal *buf = new PetscReal[nlocal * NVAR];
+    PetscInt p = 0;
+    for (PetscInt k = info.gzs; k < info.gzs + info.gzm; k++)
+        for (PetscInt j = info.gys; j < info.gys + info.gym; j++)
+            for (PetscInt i = info.gxs; i < info.gxs + info.gxm; i++) {
+                buf[p++] = axx[k][j][i];
+                buf[p++] = ayy[k][j][i];
+                buf[p++] = azz[k][j][i];
+                buf[p++] = akx[k][j][i];
+            }
+
+    int *recvcounts = nullptr, *displs = nullptr;
+    PetscReal *all_buf = nullptr;
+    if (rank == 0) {
+        recvcounts = new int[nprocs];
+        displs     = new int[nprocs];
+        int total = 0;
+        for (int r = 0; r < nprocs; r++) {
+            recvcounts[r] = all_sz[r*3+0] * all_sz[r*3+1] * all_sz[r*3+2] * NVAR;
+            displs[r] = total;
+            total += recvcounts[r];
+        }
+        all_buf = new PetscReal[total];
+    }
+    MPI_Gatherv(buf, nlocal * NVAR, MPI_DOUBLE,
+                all_buf, recvcounts, displs, MPI_DOUBLE, 0, comm);
+
+    if (rank == 0) {
+        PetscReal *grid = new PetscReal[GI * GJ * GK * NVAR]();
+        for (int r = 0; r < nprocs; r++) {
+            PetscInt sz_i = all_sz[r*3+0], sz_j = all_sz[r*3+1], sz_k = all_sz[r*3+2];
+            PetscInt off_i = all_off[r*3+0], off_j = all_off[r*3+1], off_k = all_off[r*3+2];
+            PetscReal *src = all_buf + displs[r];
+            PetscInt idx = 0;
+            for (PetscInt kl = 0; kl < sz_k; kl++) {
+                PetscInt k = off_k + kl;
+                for (PetscInt jl = 0; jl < sz_j; jl++) {
+                    PetscInt j = off_j + jl;
+                    for (PetscInt il = 0; il < sz_i; il++) {
+                        PetscInt i = off_i + il;
+                        PetscInt dst = ((k + LAP) * GJ * GI + (j + LAP) * GI + (i + LAP)) * NVAR;
+                        for (int v = 0; v < NVAR; v++)
+                            grid[dst + v] = src[idx++];
+                    }
+                }
+            }
+        }
+
+        std::string fname = filename + ".dat";
+        std::ofstream out(fname);
+        out << "TITLE = \"Cell Ghost\"\n"
+            << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\"\n"
+            << "ZONE T=\"CellGhost\", I=" << GI << ", J=" << GJ
+            << ", K=" << GK << ", F=POINT\n";
+        out.precision(8);
+        out << std::scientific;
+        PetscInt ntot = GI * GJ * GK;
+        for (PetscInt n = 0; n < ntot; n++)
+            out << grid[n*NVAR]   << " "
+                << grid[n*NVAR+1] << " "
+                << grid[n*NVAR+2] << " "
+                << grid[n*NVAR+3] << "\n";
+        out.close();
+        PetscPrintf(comm, "[ExportCellGhost] %s (%d pts, ghost included)\n",
+                    fname.c_str(), (int)ntot);
+
+        delete[] grid;
+    }
+
+    if (rank == 0) { delete[] recvcounts; delete[] displs; delete[] all_buf; }
+    delete[] buf;
+    delete[] all_sz;
+    delete[] all_off;
+
+    ierr = DMDAVecRestoreArray(da, Axx_local, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy_local, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz_local, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Akx_local, &akx); CHKERRQ(ierr);
 
     return 0;
+}
+
+// ====================================================================
+// ExportCellGhostFlowToTecplot — 导出格心 ghost 网格 + 守恒量
+// 变量: X, Y, Z, Akx, rho, rhou, rhov, rhow, rhoE
+// 维度: (nx+2*LAP) × (ny+2*LAP) × (nz+2*LAP)
+// ====================================================================
+PetscErrorCode Mesh::ExportCellGhostFlowToTecplot(const std::string &filename)
+{
+    PetscErrorCode ierr;
+    PetscMPIInt rank;
+    MPI_Comm_rank(comm, &rank);
+
+    if (!cell_pool_initialized) {
+        PetscPrintf(comm, "[ExportCellGhostFlow] cell pool not ready.\n");
+        return 0;
+    }
+
+    const int NVAR = 9;  // X, Y, Z, Akx, rho, rhou, rhov, rhow, rhoE
+
+    PetscInt nxg = nx_global;
+    PetscInt nyg = ny_global;
+    PetscInt nzg = nz_global;
+    PetscInt GI = nxg + 2 * LAP;
+    PetscInt GJ = nyg + 2 * LAP;
+    PetscInt GK = nzg + 2 * LAP;
+
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+
+    PetscReal ***axx, ***ayy, ***azz, ***akx;
+    ierr = DMDAVecGetArray(da, Axx_local, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy_local, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz_local, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Akx_local, &akx); CHKERRQ(ierr);
+
+    PetscReal ***u[5];
+    for (int c = 0; c < 5; ++c)
+        ierr = DMDAVecGetArray(da, U_local[c], &u[c]); CHKERRQ(ierr);
+
+    PetscInt send_sz[3] = {info.gxm, info.gym, info.gzm};
+    PetscInt send_off[3] = {info.gxs, info.gys, info.gzs};
+
+    int nprocs;
+    MPI_Comm_size(comm, &nprocs);
+    PetscInt *all_sz = nullptr, *all_off = nullptr;
+    if (rank == 0) {
+        all_sz  = new PetscInt[nprocs * 3];
+        all_off = new PetscInt[nprocs * 3];
+    }
+    MPI_Gather(send_sz,  3, MPI_INT, all_sz,  3, MPI_INT, 0, comm);
+    MPI_Gather(send_off, 3, MPI_INT, all_off, 3, MPI_INT, 0, comm);
+
+    PetscInt nlocal = info.gxm * info.gym * info.gzm;
+    PetscReal *buf = new PetscReal[nlocal * NVAR];
+    PetscInt p = 0;
+    for (PetscInt k = info.gzs; k < info.gzs + info.gzm; k++)
+        for (PetscInt j = info.gys; j < info.gys + info.gym; j++)
+            for (PetscInt i = info.gxs; i < info.gxs + info.gxm; i++) {
+                buf[p++] = axx[k][j][i];
+                buf[p++] = ayy[k][j][i];
+                buf[p++] = azz[k][j][i];
+                buf[p++] = akx[k][j][i];
+                for (int c = 0; c < 5; ++c)
+                    buf[p++] = u[c][k][j][i];
+            }
+
+    int *recvcounts = nullptr, *displs = nullptr;
+    PetscReal *all_buf = nullptr;
+    if (rank == 0) {
+        recvcounts = new int[nprocs];
+        displs     = new int[nprocs];
+        int total = 0;
+        for (int r = 0; r < nprocs; r++) {
+            recvcounts[r] = all_sz[r*3+0] * all_sz[r*3+1] * all_sz[r*3+2] * NVAR;
+            displs[r] = total;
+            total += recvcounts[r];
+        }
+        all_buf = new PetscReal[total];
+    }
+    MPI_Gatherv(buf, nlocal * NVAR, MPI_DOUBLE,
+                all_buf, recvcounts, displs, MPI_DOUBLE, 0, comm);
+
+    if (rank == 0) {
+        PetscReal *grid = new PetscReal[GI * GJ * GK * NVAR]();
+        for (int r = 0; r < nprocs; r++) {
+            PetscInt sz_i = all_sz[r*3+0], sz_j = all_sz[r*3+1], sz_k = all_sz[r*3+2];
+            PetscInt off_i = all_off[r*3+0], off_j = all_off[r*3+1], off_k = all_off[r*3+2];
+            PetscReal *src = all_buf + displs[r];
+            PetscInt idx = 0;
+            for (PetscInt kl = 0; kl < sz_k; kl++) {
+                PetscInt k = off_k + kl;
+                for (PetscInt jl = 0; jl < sz_j; jl++) {
+                    PetscInt j = off_j + jl;
+                    for (PetscInt il = 0; il < sz_i; il++) {
+                        PetscInt i = off_i + il;
+                        PetscInt dst = ((k + LAP) * GJ * GI + (j + LAP) * GI + (i + LAP)) * NVAR;
+                        for (int v = 0; v < NVAR; v++)
+                            grid[dst + v] = src[idx++];
+                    }
+                }
+            }
+        }
+
+        std::string fname = filename + ".dat";
+        std::ofstream out(fname);
+        out << "TITLE = \"Cell Ghost + Flow\"\n"
+            << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\", "
+            << "\"rho\", \"rhou\", \"rhov\", \"rhow\", \"rhoE\"\n"
+            << "ZONE T=\"CellGhostFlow\", I=" << GI << ", J=" << GJ
+            << ", K=" << GK << ", F=POINT\n";
+        out.precision(8);
+        out << std::scientific;
+        PetscInt ntot = GI * GJ * GK;
+        for (PetscInt n = 0; n < ntot; n++) {
+            PetscInt off = n * NVAR;
+            out << grid[off+0] << " " << grid[off+1] << " " << grid[off+2] << " "
+                << grid[off+3] << " " << grid[off+4] << " " << grid[off+5] << " "
+                << grid[off+6] << " " << grid[off+7] << " " << grid[off+8] << "\n";
+        }
+        out.close();
+        PetscPrintf(comm, "[ExportCellGhostFlow] %s (%d pts, cell-centered ghost+flow)\n",
+                    fname.c_str(), (int)ntot);
+
+        delete[] grid;
+    }
+
+    if (rank == 0) { delete[] recvcounts; delete[] displs; delete[] all_buf; }
+    delete[] buf;
+    delete[] all_sz;
+    delete[] all_off;
+
+    ierr = DMDAVecRestoreArray(da, Axx_local, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy_local, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz_local, &azz); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Akx_local, &akx); CHKERRQ(ierr);
+    for (int c = 0; c < 5; ++c)
+        ierr = DMDAVecRestoreArray(da, U_local[c], &u[c]); CHKERRQ(ierr);
+
+    return 0;
+}
+
+void MultiBlockMesh::ExportAllFlowToTecplot(const std::string &filename)
+{
+    PetscMPIInt rank, world_size;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &world_size);
+    PetscInt nb = getNumBlocks();
+
+    if (rank == 0) {
+        std::string outname = filename + ".dat";
+        std::ofstream f(outname);
+        f << "TITLE = \"All Blocks Flow Field\"\n"
+          << "VARIABLES = \"X\", \"Y\", \"Z\", \"rho\", \"rhou\", \"rhov\", \"rhow\", \"rhoE\"\n";
+        f.close();
+    }
+
+    for (PetscInt b = 0; b < nb; ++b) {
+        Mesh* blk = getBlock(b);
+
+        PetscMPIInt have_block = (blk != nullptr) ? 1 : 0;
+        PetscMPIInt root_rank = -1;
+        std::vector<PetscMPIInt> all_have(world_size);
+        MPI_Allgather(&have_block, 1, MPI_INT, all_have.data(), 1, MPI_INT, PETSC_COMM_WORLD);
+        for (int r = 0; r < world_size; r++) {
+            if (all_have[r]) { root_rank = r; break; }
+        }
+        if (root_rank < 0) continue;
+
+        PetscInt nxv, nyv, nzv, nxc, nyc, nzc;
+        PetscInt dims[6];
+        if (rank == root_rank) {
+            nxv = full_coords_[b].node_ni;
+            nyv = full_coords_[b].node_nj;
+            nzv = full_coords_[b].node_nk;
+            nxc = full_coords_[b].ni;
+            nyc = full_coords_[b].nj;
+            nzc = full_coords_[b].nk;
+            dims[0] = nxv; dims[1] = nyv; dims[2] = nzv;
+            dims[3] = nxc; dims[4] = nyc; dims[5] = nzc;
+        }
+        MPI_Bcast(dims, 6, MPI_INT, root_rank, PETSC_COMM_WORLD);
+        nxv = dims[0]; nyv = dims[1]; nzv = dims[2];
+        nxc = dims[3]; nyc = dims[4]; nzc = dims[5];
+        PetscInt total_v = nxv * nyv * nzv;
+
+        // 格点坐标广播到 block_comm
+        std::vector<PetscReal> node_coords;
+        MPI_Comm comm = block_comms_[b];
+        if (blk) {
+            if (rank == root_rank) {
+                node_coords.resize(total_v * 3);
+                for (PetscInt i = 0; i < total_v; ++i) {
+                    node_coords[i*3+0] = full_coords_[b].node_x[i];
+                    node_coords[i*3+1] = full_coords_[b].node_y[i];
+                    node_coords[i*3+2] = full_coords_[b].node_z[i];
+                }
+            } else {
+                node_coords.resize(total_v * 3);
+            }
+            MPI_Bcast(node_coords.data(), total_v * 3, MPI_DOUBLE, 0, comm);
+        }
+
+        // DMDA 局部数组（含 ghost）→ 距离反比加权
+        std::vector<PetscReal> node_vals(total_v * 5, 0.0);
+        std::vector<PetscReal> weights(total_v, 0.0);
+
+        if (blk) {
+            DMDALocalInfo info;
+            DMDAGetLocalInfo(blk->getDM(), &info);
+
+            auto coordVecs = blk->getLocalCoordinateVecs();
+            PetscReal ***axx, ***ayy, ***azz;
+            DMDAVecGetArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecGetArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecGetArray(blk->getDM(), coordVecs[2], &azz);
+
+            auto uVecs = blk->getLocalUVecs();
+            PetscReal ***u[5];
+            for (int c = 0; c < 5; ++c)
+                DMDAVecGetArray(blk->getDM(), uVecs[c], &u[c]);
+
+            // ---- 遍历所有局部格心（含 ghost），只做反距离加权，不搞梯度修正 ----
+            // 面虚网格已由 BC filler / 块间连接填好，壁面 ghost=-phys，自然抵消 → rhou=0
+            for (PetscInt k = info.gzs; k < info.gzs + info.gzm; ++k)
+                for (PetscInt j = info.gys; j < info.gys + info.gym; ++j)
+                    for (PetscInt i = info.gxs; i < info.gxs + info.gxm; ++i) {
+                        // 棱角虚网格跳过（U 未填）
+                        int ndir = 0;
+                        if (i < 0 || i >= nxc) ndir++;
+                        if (j < 0 || j >= nyc) ndir++;
+                        if (k < 0 || k >= nzc) ndir++;
+                        if (ndir >= 2) continue;
+
+                        PetscReal cx = axx[k][j][i];
+                        PetscReal cy = ayy[k][j][i];
+                        PetscReal cz = azz[k][j][i];
+                        PetscReal cv[5];
+                        for (int c = 0; c < 5; ++c) cv[c] = u[c][k][j][i];
+
+                        for (int dk = 0; dk <= 1; ++dk) {
+                            PetscInt kv = k + dk;
+                            if (kv < 0 || kv >= nzv) continue;
+                            for (int dj = 0; dj <= 1; ++dj) {
+                                PetscInt jv = j + dj;
+                                if (jv < 0 || jv >= nyv) continue;
+                                for (int di = 0; di <= 1; ++di) {
+                                    PetscInt iv = i + di;
+                                    if (iv < 0 || iv >= nxv) continue;
+                                    PetscInt idx_v = (kv * nyv + jv) * nxv + iv;
+                                    PetscReal nx = node_coords[idx_v*3+0];
+                                    PetscReal ny = node_coords[idx_v*3+1];
+                                    PetscReal nz = node_coords[idx_v*3+2];
+                                    PetscReal dx = cx - nx;
+                                    PetscReal dy = cy - ny;
+                                    PetscReal dz = cz - nz;
+                                    PetscReal dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                                    if (dist < 1e-30) dist = 1e-30;
+                                    PetscReal w = 1.0 / dist;
+                                    for (int c = 0; c < 5; ++c)
+                                        node_vals[idx_v*5 + c] += cv[c] * w;
+                                    weights[idx_v] += w;
+                                }
+                            }
+                        }
+                    }
+
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[2], &azz);
+            for (int c = 0; c < 5; ++c)
+                DMDAVecRestoreArray(blk->getDM(), uVecs[c], &u[c]);
+        }
+
+        // MPI_Reduce 在 block_comm 内
+        std::vector<PetscReal> rnode_vals(total_v * 5, 0.0);
+        std::vector<PetscReal> rweights(total_v, 0.0);
+        if (blk) {
+            MPI_Reduce(node_vals.data(), rnode_vals.data(), total_v * 5, MPI_DOUBLE, MPI_SUM, 0, comm);
+            MPI_Reduce(weights.data(),  rweights.data(),  total_v,     MPI_DOUBLE, MPI_SUM, 0, comm);
+        }
+
+        // block rank 0 归一化，发送到 world rank 0
+        std::vector<PetscReal> node_coords_send, flow_send;
+        if (rank == root_rank) {
+            for (PetscInt i = 0; i < total_v; ++i)
+                if (rweights[i] > 0.0) {
+                    PetscReal inv = 1.0 / rweights[i];
+                    for (int c = 0; c < 5; ++c) rnode_vals[i*5 + c] *= inv;
+                }
+            // 修正棱角格点：用已算对的面内部格点线性插值
+            fixEdgeCornerNodes(rnode_vals, 5, nxv, nyv, nzv);
+            node_coords_send = std::move(node_coords);
+            flow_send = std::move(rnode_vals);
+        }
+
+        if (root_rank != 0) {
+            if (rank == 0) {
+                node_coords_send.resize(total_v * 3);
+                flow_send.resize(total_v * 5);
+            }
+            MPI_Status st;
+            if (rank == root_rank) {
+                MPI_Send(node_coords_send.data(), total_v * 3, MPI_DOUBLE, 0, 200, PETSC_COMM_WORLD);
+                MPI_Send(flow_send.data(),       total_v * 5, MPI_DOUBLE, 0, 201, PETSC_COMM_WORLD);
+            } else if (rank == 0) {
+                MPI_Recv(node_coords_send.data(), total_v * 3, MPI_DOUBLE, root_rank, 200, PETSC_COMM_WORLD, &st);
+                MPI_Recv(flow_send.data(),       total_v * 5, MPI_DOUBLE, root_rank, 201, PETSC_COMM_WORLD, &st);
+            }
+        }
+
+        if (rank == 0) {
+            std::string outname = filename + ".dat";
+            std::ofstream f(outname, std::ios::app);
+            f << "ZONE T=\"Block " << (int)b << "\""
+              << ", I=" << nxv << ", J=" << nyv << ", K=" << nzv
+              << ", F=POINT\n";
+            f.precision(8);
+            f << std::scientific;
+            for (PetscInt i = 0; i < total_v; i++)
+                f << node_coords_send[i*3]   << " "
+                  << node_coords_send[i*3+1] << " "
+                  << node_coords_send[i*3+2] << " "
+                  << flow_send[i*5]     << " "
+                  << flow_send[i*5+1]   << " "
+                  << flow_send[i*5+2]   << " "
+                  << flow_send[i*5+3]   << " "
+                  << flow_send[i*5+4]   << "\n";
+            f.close();
+        }
+    }
+
+    if (rank == 0)
+        PetscPrintf(PETSC_COMM_WORLD, "[ExportAllFlow] %d blocks → %s.dat\n", (int)nb, filename.c_str());
+}
+// ====================================================================
+// ExportAllCellFlowToTecplot — 格心型物理量输出（纯物理格心，无 ghost，无 C→N）
+// ====================================================================
+void MultiBlockMesh::ExportAllCellFlowToTecplot(const std::string &filename)
+{
+    PetscMPIInt rank, world_size;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &world_size);
+    PetscInt nb = getNumBlocks();
+
+    if (rank == 0) {
+        std::string outname = filename + ".dat";
+        std::ofstream f(outname);
+        f << "TITLE = \"All Blocks Cell Flow\"\n"
+          << "VARIABLES = \"X\", \"Y\", \"Z\", \"rho\", \"rhou\", \"rhov\", \"rhow\", \"rhoE\"\n";
+        f.close();
+    }
+
+    for (PetscInt b = 0; b < nb; ++b) {
+        Mesh* blk = getBlock(b);
+
+        PetscMPIInt have_block = (blk != nullptr) ? 1 : 0;
+        std::vector<PetscMPIInt> all_have(world_size);
+        MPI_Allgather(&have_block, 1, MPI_INT, all_have.data(), 1, MPI_INT, PETSC_COMM_WORLD);
+        PetscMPIInt root_rank = -1;
+        for (int r = 0; r < world_size; r++) {
+            if (all_have[r]) { root_rank = r; break; }
+        }
+        if (root_rank < 0) continue;
+
+        PetscInt dims[3];
+        if (rank == root_rank) {
+            dims[0] = full_coords_[b].ni;
+            dims[1] = full_coords_[b].nj;
+            dims[2] = full_coords_[b].nk;
+        }
+        MPI_Bcast(dims, 3, MPI_INT, root_rank, PETSC_COMM_WORLD);
+        PetscInt nxc = dims[0], nyc = dims[1], nzc = dims[2];
+        PetscInt total_c = nxc * nyc * nzc;
+        MPI_Comm comm = block_comms_[b];
+
+        // 格心坐标 + 守恒量（local DMDA 含 ghost）
+        std::vector<PetscReal> cell_data(total_c * 8, 0.0);  // X,Y,Z + 5 comps = 8
+        std::vector<PetscReal> cnt(total_c, 0.0);
+
+        if (blk) {
+            DMDALocalInfo info;
+            DMDAGetLocalInfo(blk->getDM(), &info);
+
+            auto coordVecs = blk->getLocalCoordinateVecs();
+            PetscReal ***axx, ***ayy, ***azz;
+            DMDAVecGetArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecGetArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecGetArray(blk->getDM(), coordVecs[2], &azz);
+
+            auto uVecs = blk->getLocalUVecs();
+            PetscReal ***u[5];
+            for (int c = 0; c < 5; ++c)
+                DMDAVecGetArray(blk->getDM(), uVecs[c], &u[c]);
+
+            for (PetscInt k = info.gzs; k < info.gzs + info.gzm; ++k)
+                for (PetscInt j = info.gys; j < info.gys + info.gym; ++j)
+                    for (PetscInt i = info.gxs; i < info.gxs + info.gxm; ++i) {
+                        if (i < 0 || i >= nxc || j < 0 || j >= nyc || k < 0 || k >= nzc)
+                            continue;  // 只取物理格心
+                        PetscInt idx = (k * nyc + j) * nxc + i;
+                        PetscInt off = idx * 8;
+                        cell_data[off+0] = axx[k][j][i];
+                        cell_data[off+1] = ayy[k][j][i];
+                        cell_data[off+2] = azz[k][j][i];
+                        for (int c = 0; c < 5; ++c)
+                            cell_data[off+3+c] = u[c][k][j][i];
+                        cnt[idx] = 1.0;
+                    }
+
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[2], &azz);
+            for (int c = 0; c < 5; ++c)
+                DMDAVecRestoreArray(blk->getDM(), uVecs[c], &u[c]);
+        }
+
+        // Reduce within block_comm
+        std::vector<PetscReal> rcell_data(total_c * 8, 0.0);
+        std::vector<PetscReal> rcnt(total_c, 0.0);
+        if (blk) {
+            MPI_Reduce(cell_data.data(), rcell_data.data(), total_c * 8, MPI_DOUBLE, MPI_SUM, 0, comm);
+            MPI_Reduce(cnt.data(), rcnt.data(), total_c, MPI_DOUBLE, MPI_SUM, 0, comm);
+        }
+
+        // Send from root_rank to world rank 0
+        std::vector<PetscReal> cell_send;
+        if (rank == root_rank) {
+            for (PetscInt i = 0; i < total_c; ++i)
+                if (rcnt[i] <= 0.0) {
+                    // 极少数没被物理格心覆盖的（不应发生），清零
+                    for (int v = 0; v < 8; ++v) rcell_data[i*8+v] = 0.0;
+                }
+            cell_send = std::move(rcell_data);
+        }
+
+        if (root_rank != 0) {
+            if (rank == 0) cell_send.resize(total_c * 8);
+            MPI_Status st;
+            if (rank == root_rank)
+                MPI_Send(cell_send.data(), total_c * 8, MPI_DOUBLE, 0, 300, PETSC_COMM_WORLD);
+            else if (rank == 0)
+                MPI_Recv(cell_send.data(), total_c * 8, MPI_DOUBLE, root_rank, 300, PETSC_COMM_WORLD, &st);
+        }
+
+        if (rank == 0) {
+            std::string outname = filename + ".dat";
+            std::ofstream f(outname, std::ios::app);
+            f << "ZONE T=\"Block " << (int)b << "\""
+              << ", I=" << nxc << ", J=" << nyc << ", K=" << nzc
+              << ", F=POINT\n";
+            f.precision(8);
+            f << std::scientific;
+            for (PetscInt i = 0; i < total_c; i++) {
+                PetscInt off = i * 8;
+                f << cell_send[off+0] << " " << cell_send[off+1] << " " << cell_send[off+2] << " "
+                  << cell_send[off+3] << " " << cell_send[off+4] << " " << cell_send[off+5] << " "
+                  << cell_send[off+6] << " " << cell_send[off+7] << "\n";
+            }
+            f.close();
+        }
+    }
+
+    if (rank == 0)
+        PetscPrintf(PETSC_COMM_WORLD, "[ExportAllCellFlow] %d blocks → %s.dat\n", (int)nb, filename.c_str());
+}
+// ExportAllMetricsToTecplot — 导出格点型度量系数（原始格点坐标 + 距离反比加权 Akx,Aiy,Asz）
+// ====================================================================
+void MultiBlockMesh::ExportAllMetricsToTecplot(const std::string &filename)
+{
+    PetscMPIInt rank, world_size;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &world_size);
+    PetscInt nb = getNumBlocks();
+
+    if (rank == 0) {
+        std::string outname = filename + ".dat";
+        std::ofstream f(outname);
+        f << "TITLE = \"All Blocks Metrics\"\n"
+          << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\", \"Aiy\", \"Asz\"\n";
+        f.close();
+    }
+
+    for (PetscInt b = 0; b < nb; ++b) {
+        Mesh* blk = getBlock(b);
+
+        PetscMPIInt have_block = (blk != nullptr) ? 1 : 0;
+        PetscMPIInt root_rank = -1;
+        std::vector<PetscMPIInt> all_have(world_size);
+        MPI_Allgather(&have_block, 1, MPI_INT, all_have.data(), 1, MPI_INT, PETSC_COMM_WORLD);
+        for (int r = 0; r < world_size; r++) {
+            if (all_have[r]) { root_rank = r; break; }
+        }
+        if (root_rank < 0) continue;
+
+        PetscInt nxv, nyv, nzv, nxc, nyc, nzc;
+        PetscInt dims[6];
+        if (rank == root_rank) {
+            nxv = full_coords_[b].node_ni;
+            nyv = full_coords_[b].node_nj;
+            nzv = full_coords_[b].node_nk;
+            nxc = full_coords_[b].ni;
+            nyc = full_coords_[b].nj;
+            nzc = full_coords_[b].nk;
+            dims[0] = nxv; dims[1] = nyv; dims[2] = nzv;
+            dims[3] = nxc; dims[4] = nyc; dims[5] = nzc;
+        }
+        MPI_Bcast(dims, 6, MPI_INT, root_rank, PETSC_COMM_WORLD);
+        nxv = dims[0]; nyv = dims[1]; nzv = dims[2];
+        nxc = dims[3]; nyc = dims[4]; nzc = dims[5];
+        PetscInt total_v = nxv * nyv * nzv;
+
+        std::vector<PetscReal> node_coords;
+        MPI_Comm comm = block_comms_[b];
+        if (blk) {
+            if (rank == root_rank) {
+                node_coords.resize(total_v * 3);
+                for (PetscInt i = 0; i < total_v; ++i) {
+                    node_coords[i*3+0] = full_coords_[b].node_x[i];
+                    node_coords[i*3+1] = full_coords_[b].node_y[i];
+                    node_coords[i*3+2] = full_coords_[b].node_z[i];
+                }
+            } else {
+                node_coords.resize(total_v * 3);
+            }
+            MPI_Bcast(node_coords.data(), total_v * 3, MPI_DOUBLE, 0, comm);
+        }
+
+        std::vector<PetscReal> node_vals(total_v * 3, 0.0);
+        std::vector<PetscReal> weights(total_v, 0.0);
+
+        if (blk) {
+            DMDALocalInfo info;
+            DMDAGetLocalInfo(blk->getDM(), &info);
+
+            auto coordVecs = blk->getLocalCoordinateVecs();
+            PetscReal ***axx, ***ayy, ***azz;
+            DMDAVecGetArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecGetArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecGetArray(blk->getDM(), coordVecs[2], &azz);
+
+            auto metVecs = blk->getLocalMetricVecs();
+            PetscReal ***akx_arr, ***aiy_arr, ***asz_arr;
+            DMDAVecGetArray(blk->getDM(), metVecs[0], &akx_arr);
+            DMDAVecGetArray(blk->getDM(), metVecs[4], &aiy_arr);
+            DMDAVecGetArray(blk->getDM(), metVecs[8], &asz_arr);
+
+            for (PetscInt k = info.gzs; k < info.gzs + info.gzm; ++k)
+                for (PetscInt j = info.gys; j < info.gys + info.gym; ++j)
+                    for (PetscInt i = info.gxs; i < info.gxs + info.gxm; ++i) {
+                        PetscReal cx = axx[k][j][i];
+                        PetscReal cy = ayy[k][j][i];
+                        PetscReal cz = azz[k][j][i];
+                        PetscReal cv[3] = {akx_arr[k][j][i], aiy_arr[k][j][i], asz_arr[k][j][i]};
+
+                        for (int dk = 0; dk <= 1; ++dk) {
+                            PetscInt kv = k + dk;
+                            if (kv < 0 || kv >= nzv) continue;
+                            for (int dj = 0; dj <= 1; ++dj) {
+                                PetscInt jv = j + dj;
+                                if (jv < 0 || jv >= nyv) continue;
+                                for (int di = 0; di <= 1; ++di) {
+                                    PetscInt iv = i + di;
+                                    if (iv < 0 || iv >= nxv) continue;
+                                    PetscInt idx_v = (kv * nyv + jv) * nxv + iv;
+                                    PetscReal nx = node_coords[idx_v*3+0];
+                                    PetscReal ny = node_coords[idx_v*3+1];
+                                    PetscReal nz = node_coords[idx_v*3+2];
+                                    PetscReal dx = cx - nx;
+                                    PetscReal dy = cy - ny;
+                                    PetscReal dz = cz - nz;
+                                    PetscReal dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                                    if (dist < 1e-30) dist = 1e-30;
+                                    PetscReal w = 1.0 / dist;
+                                    for (int c = 0; c < 3; ++c)
+                                        node_vals[idx_v*3 + c] += cv[c] * w;
+                                    weights[idx_v] += w;
+                                }
+                            }
+                        }
+                    }
+
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[0], &axx);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[1], &ayy);
+            DMDAVecRestoreArray(blk->getDM(), coordVecs[2], &azz);
+            DMDAVecRestoreArray(blk->getDM(), metVecs[0], &akx_arr);
+            DMDAVecRestoreArray(blk->getDM(), metVecs[4], &aiy_arr);
+            DMDAVecRestoreArray(blk->getDM(), metVecs[8], &asz_arr);
+        }
+
+        std::vector<PetscReal> rnode_vals(total_v * 3, 0.0);
+        std::vector<PetscReal> rweights(total_v, 0.0);
+        if (blk) {
+            MPI_Reduce(node_vals.data(), rnode_vals.data(), total_v * 3, MPI_DOUBLE, MPI_SUM, 0, comm);
+            MPI_Reduce(weights.data(),  rweights.data(),  total_v,     MPI_DOUBLE, MPI_SUM, 0, comm);
+        }
+
+        std::vector<PetscReal> node_coords_send, met_send;
+        if (rank == root_rank) {
+            for (PetscInt i = 0; i < total_v; ++i)
+                if (rweights[i] > 0.0) {
+                    PetscReal inv = 1.0 / rweights[i];
+                    for (int c = 0; c < 3; ++c) rnode_vals[i*3 + c] *= inv;
+                }
+            fixEdgeCornerNodes(rnode_vals, 3, nxv, nyv, nzv);
+            node_coords_send = std::move(node_coords);
+            met_send = std::move(rnode_vals);
+        }
+
+        if (root_rank != 0) {
+            if (rank == 0) {
+                node_coords_send.resize(total_v * 3);
+                met_send.resize(total_v * 3);
+            }
+            MPI_Status st;
+            if (rank == root_rank) {
+                MPI_Send(node_coords_send.data(), total_v * 3, MPI_DOUBLE, 0, 210, PETSC_COMM_WORLD);
+                MPI_Send(met_send.data(),        total_v * 3, MPI_DOUBLE, 0, 211, PETSC_COMM_WORLD);
+            } else if (rank == 0) {
+                MPI_Recv(node_coords_send.data(), total_v * 3, MPI_DOUBLE, root_rank, 210, PETSC_COMM_WORLD, &st);
+                MPI_Recv(met_send.data(),        total_v * 3, MPI_DOUBLE, root_rank, 211, PETSC_COMM_WORLD, &st);
+            }
+        }
+
+        if (rank == 0) {
+            std::string outname = filename + ".dat";
+            std::ofstream f(outname, std::ios::app);
+            f << "ZONE T=\"Block " << (int)b << "\""
+              << ", I=" << nxv << ", J=" << nyv << ", K=" << nzv
+              << ", F=POINT\n";
+            f.precision(8);
+            f << std::scientific;
+            for (PetscInt i = 0; i < total_v; i++)
+                f << node_coords_send[i*3]   << " "
+                  << node_coords_send[i*3+1] << " "
+                  << node_coords_send[i*3+2] << " "
+                  << met_send[i*3]           << " "
+                  << met_send[i*3+1]         << " "
+                  << met_send[i*3+2]         << "\n";
+            f.close();
+        }
+    }
+
+    if (rank == 0)
+        PetscPrintf(PETSC_COMM_WORLD, "[ExportAllMetrics] %d blocks → %s.dat\n", (int)nb, filename.c_str());
 }
 //输出一个文件
 void MultiBlockMesh::ExportAllToTecplot(const std::string &filename) {
@@ -1143,8 +2176,14 @@ void MultiBlockMesh::ExportAllToTecplot(const std::string &filename) {
     if (rank == 0) {
         std::string outname = filename + ".dat";
         std::ofstream outfile(outname);
+        if (!outfile.is_open()) {
+            PetscPrintf(PETSC_COMM_WORLD, "Error: Cannot open output file %s\n", outname.c_str());
+            return;
+        }
+        
         outfile << "TITLE = \"Multi-Block Grid\"\n";
-        outfile << "VARIABLES = \"X\", \"Y\", \"Z\", \"Akx\", \"Akx1\", \"Axx\"\n";
+        // 根据 Mesh::ExportToTecplot 的实现，变量仅为 X, Y, Z
+        outfile << "VARIABLES = \"X\", \"Y\", \"Z\"\n";
 
         for (PetscInt b = 0; b < static_cast<PetscInt>(blocks_.size()); ++b) {
             std::string tempname = "_temp_block_" + std::to_string(b) + ".dat";
@@ -1175,6 +2214,145 @@ void MultiBlockMesh::ExportAllToTecplot(const std::string &filename) {
         PetscPrintf(PETSC_COMM_WORLD, "Multi-block data merged into %s\n", outname.c_str());
     }
 }
+PetscErrorCode Mesh::ExportFlowToTecplot(const std::string &filename)
+{
+    PetscErrorCode ierr;
+    PetscMPIInt rank;
+    MPI_Comm_rank(comm, &rank);
+
+    PetscInt nxg = nx_global, nyg = ny_global, nzg = nz_global;
+    // ★ 顶点维度 = 格心维度 + 1
+    PetscInt nxv = nxg + 1, nyv = nyg + 1, nzv = nzg + 1;
+    PetscInt total_v = nxv * nyv * nzv;
+
+    // ---- 格心坐标 + 格心物理量（共享同一个格心 DMDA 的 local info）----
+    DMDALocalInfo info;
+    ierr = DMDAGetLocalInfo(da, &info); CHKERRQ(ierr);
+    PetscReal ***axx, ***ayy, ***azz;
+    ierr = DMDAVecGetArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecGetArray(da, Azz, &azz); CHKERRQ(ierr);
+
+    PetscReal ***u[5];
+    for (int c = 0; c < 5; c++)
+        ierr = DMDAVecGetArray(da, U[c], &u[c]); CHKERRQ(ierr);
+
+    // ★ 坐标平均到格点
+    std::vector<PetscReal> coords(total_v * 3, 0.0);
+    std::vector<int>       cnt_c(total_v, 0);
+    PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
+    PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
+    for (PetscInt k = zs; k < zs + zm; k++)
+        for (PetscInt j = ys; j < ys + ym; j++)
+            for (PetscInt i = xs; i < xs + xm; i++) {
+                if (i < 0 || i >= nxg || j < 0 || j >= nyg || k < 0 || k >= nzg) continue;
+                for (int dk = 0; dk <= 1; dk++) {
+                    PetscInt kv = k + dk;
+                    if (kv < 0 || kv >= nzv) continue;
+                    for (int dj = 0; dj <= 1; dj++) {
+                        PetscInt jv = j + dj;
+                        if (jv < 0 || jv >= nyv) continue;
+                        for (int di = 0; di <= 1; di++) {
+                            PetscInt iv = i + di;
+                            if (iv < 0 || iv >= nxv) continue;
+                            PetscInt p = (iv + jv * nxv + kv * nxv * nyv) * 3;
+                            coords[p+0] += axx[k][j][i];
+                            coords[p+1] += ayy[k][j][i];
+                            coords[p+2] += azz[k][j][i];
+                            cnt_c[iv + jv * nxv + kv * nxv * nyv]++;
+                        }
+                    }
+                }
+            }
+
+    // ★ 物理量：格心平均到格点
+    std::vector<PetscReal> flow(total_v * 5, 0.0);
+    std::vector<int>       cnt_f(total_v, 0);
+    for (PetscInt k = zs; k < zs + zm; k++)
+        for (PetscInt j = ys; j < ys + ym; j++)
+            for (PetscInt i = xs; i < xs + xm; i++) {
+                if (i < 0 || i >= nxg || j < 0 || j >= nyg || k < 0 || k >= nzg) continue;
+                for (int dk = 0; dk <= 1; dk++) {
+                    PetscInt kv = k + dk;
+                    if (kv < 0 || kv >= nzv) continue;
+                    for (int dj = 0; dj <= 1; dj++) {
+                        PetscInt jv = j + dj;
+                        if (jv < 0 || jv >= nyv) continue;
+                        for (int di = 0; di <= 1; di++) {
+                            PetscInt iv = i + di;
+                            if (iv < 0 || iv >= nxv) continue;
+                            PetscInt p = (iv + jv * nxv + kv * nxv * nyv) * 5;
+                            for (int c = 0; c < 5; c++)
+                                flow[p + c] += u[c][k][j][i];
+                            cnt_f[iv + jv * nxv + kv * nxv * nyv]++;
+                        }
+                    }
+                }
+            }
+
+    // 释放
+    ierr = DMDAVecRestoreArray(da, Axx, &axx); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Ayy, &ayy); CHKERRQ(ierr);
+    ierr = DMDAVecRestoreArray(da, Azz, &azz); CHKERRQ(ierr);
+    for (int c = 0; c < 5; c++)
+        ierr = DMDAVecRestoreArray(da, U[c], &u[c]); CHKERRQ(ierr);
+
+    // Reduce 到 rank 0
+    std::vector<PetscReal> rcoords, rflow;
+    std::vector<int>       rcnt_c, rcnt_f;
+    if (rank == 0) {
+        rcoords.resize(total_v * 3);
+        rflow.resize(total_v * 5);
+        rcnt_c.resize(total_v);
+        rcnt_f.resize(total_v);
+    }
+    MPI_Reduce(coords.data(), rcoords.data(), total_v * 3, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(flow.data(),   rflow.data(),   total_v * 5, MPI_DOUBLE, MPI_SUM, 0, comm);
+    MPI_Reduce(cnt_c.data(),  rcnt_c.data(),  total_v,     MPI_INT,    MPI_SUM, 0, comm);
+    MPI_Reduce(cnt_f.data(),  rcnt_f.data(),  total_v,     MPI_INT,    MPI_SUM, 0, comm);
+
+    if (rank == 0) {
+        // 坐标归一化
+        for (PetscInt i = 0; i < total_v; i++) {
+            if (rcnt_c[i] > 0) {
+                PetscReal inv = 1.0 / (PetscReal)rcnt_c[i];
+                rcoords[i*3]   *= inv;
+                rcoords[i*3+1] *= inv;
+                rcoords[i*3+2] *= inv;
+            }
+        }
+        // 物理量归一化
+        for (PetscInt i = 0; i < total_v; i++) {
+            if (rcnt_f[i] > 0) {
+                PetscReal inv = 1.0 / (PetscReal)rcnt_f[i];
+                PetscInt p = i * 5;
+                for (int c = 0; c < 5; c++) rflow[p + c] *= inv;
+            }
+        }
+
+        std::string outname = filename + ".dat";
+        std::ofstream f(outname);
+        f << "TITLE = \"Flow Field\"\n"
+          << "VARIABLES = \"X\", \"Y\", \"Z\", \"rho\", \"rhou\", \"rhov\", \"rhow\", \"rhoE\"\n"
+          // ★ Zone 维度改为顶点维度
+          << "ZONE T=\"Flow\", I=" << nxv << ", J=" << nyv << ", K=" << nzv << ", F=POINT\n";
+        f.precision(8);
+        f << std::scientific;
+        for (PetscInt i = 0; i < total_v; i++) {
+            f << rcoords[i*3]   << " "
+              << rcoords[i*3+1] << " "
+              << rcoords[i*3+2] << " "
+              << rflow[i*5]     << " "
+              << rflow[i*5+1]   << " "
+              << rflow[i*5+2]   << " "
+              << rflow[i*5+3]   << " "
+              << rflow[i*5+4]   << "\n";
+        }
+        f.close();
+    }
+    return 0;
+}
+
 // 打印网格信息
 void Mesh::printInfo() const
 {
@@ -1183,11 +2361,11 @@ void Mesh::printInfo() const
                 "  Global size: %ld x %ld x %ld\n"
                 "  Local size:  %ld x %ld x %ld\n"
                 "  Grid type:   %d\n"
-                "  My ID:       %d, Process division: (%d,%d,%d)\n",
+                "  My ID:       Process division: (%d,%d,%d)\n",
                 (long)nx_global, (long)ny_global, (long)nz_global,
                 (long)nx, (long)ny, (long)nz,
                 (int)Iflag_Gridtype,
-                (int)my_id, (int)npx0, (int)npy0, (int)npz0);
+                (int)npx0, (int)npy0, (int)npz0);
 }
 //查询连接信息
 std::pair<int,int> MultiBlockMesh::findConnectedFace(int block, int face) const
@@ -1230,10 +2408,25 @@ void MultiBlockMesh::printTopology() const
     for (size_t b = 0; b < blocks_.size(); ++b) {
         PetscPrintf(PETSC_COMM_WORLD, "  Block %d \"%s\":\n", (int)b, block_names_[b].c_str());
         for (int f = 0; f < 6; ++f) {
-            auto [db, df] = findConnectedFace((int)b, f);
-            if (db >= 0) {
-                PetscPrintf(PETSC_COMM_WORLD, "    %-7s ->  Block %d [%s]\n",
-                            face_names[f], db, face_names[df]);
+            // 查找连接并判断是否周期性
+            const FaceConnectivity* fc = nullptr;
+            for (const auto& c : face_connections_) {
+                if ((c.block_a == (int)b && c.face_a == f) ||
+                    (c.block_b == (int)b && c.face_b == f)) {
+                    fc = &c;
+                    break;
+                }
+            }
+            if (fc) {
+                int db, df;
+                if (fc->block_a == (int)b && fc->face_a == f) {
+                    db = fc->block_b;  df = fc->face_b;
+                } else {
+                    db = fc->block_a;  df = fc->face_a;
+                }
+                const char* tag = fc->is_periodic ? " (periodic)" : "";
+                PetscPrintf(PETSC_COMM_WORLD, "    %-7s ->  Block %d [%s]%s\n",
+                            face_names[f], db, face_names[df], tag);
             } else {
                 std::string bc_str = "(none)";
                 for (const auto &bc : face_bcs_) {
@@ -1248,281 +2441,5 @@ void MultiBlockMesh::printTopology() const
     }
     PetscPrintf(PETSC_COMM_WORLD, "====================================\n\n");
 }
-// ====================================================================
-// exchangeDonorSlabs — 为每个连接面交换 LAP 层 slab
-// ====================================================================
-void MultiBlockMesh::exchangeDonorSlabs(const std::vector<PetscInt>& block_start_rank)
-{
-    PetscMPIInt rank;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
 
-    PetscInt num_blocks = (PetscInt)full_coords_.size();
-
-    PetscInt my_block = -1;
-    for (PetscInt b = 0; b < num_blocks; ++b) {
-        if (full_coords_[b].valid) { my_block = b; break; }
-    }
-
-    // ============================
-    // ★ packSlab: 法向从 interior layer 1 开始打包
-    // ============================
-    auto packSlab = [&](PetscInt donor_block, PetscInt donor_face,
-                        const cgsize_t* donorrange) -> DonorSlab
-    {
-        DonorSlab slab;
-        const auto& coords = full_coords_[donor_block];
-        if (!coords.valid) return slab;
-
-        PetscInt NI = coords.ni, NJ = coords.nj, NK = coords.nk;
-
-        PetscInt dr_imin = (PetscInt)donorrange[0];
-        PetscInt dr_imax = (PetscInt)donorrange[1];
-        PetscInt dr_jmin = (PetscInt)donorrange[2];
-        PetscInt dr_jmax = (PetscInt)donorrange[3];
-        PetscInt dr_kmin = (PetscInt)donorrange[4];
-        PetscInt dr_kmax = (PetscInt)donorrange[5];
-
-        if (dr_imin < 0)  dr_imin = 0;
-        if (dr_jmin < 0)  dr_jmin = 0;
-        if (dr_kmin < 0)  dr_kmin = 0;
-        if (dr_imax >= NI) dr_imax = NI - 1;
-        if (dr_jmax >= NJ) dr_jmax = NJ - 1;
-        if (dr_kmax >= NK) dr_kmax = NK - 1;
-
-        if (dr_imin > dr_imax || dr_jmin > dr_jmax || dr_kmin > dr_kmax)
-            return slab;
-
-        // 法向深度（去掉 boundary，只装 interior layers）
-        PetscInt nd_i = (LAP < NI-1) ? LAP : NI-1;
-        PetscInt nd_j = (LAP < NJ-1) ? LAP : NJ-1;
-        PetscInt nd_k = (LAP < NK-1) ? LAP : NK-1;
-
-        switch (donor_face) {
-        case 0: // i-min: 法向=i, 从 interior layer 1 开始
-            slab.i0 = 1;              slab.j0 = dr_jmin;  slab.k0 = dr_kmin;
-            slab.ni = LAP;            slab.nj = dr_jmax - dr_jmin + 1;
-                                      slab.nk = dr_kmax - dr_kmin + 1;
-            break;
-        case 1: // i-max: 法向=i, 从 NI-LAP-1 开始
-            slab.i0 = NI - LAP - 1;   slab.j0 = dr_jmin;  slab.k0 = dr_kmin;
-            slab.ni = LAP;            slab.nj = dr_jmax - dr_jmin + 1;
-                                      slab.nk = dr_kmax - dr_kmin + 1;
-            break;
-        case 2: // j-min: 法向=j, 从 interior layer 1 开始
-            slab.i0 = dr_imin;        slab.j0 = 1;        slab.k0 = dr_kmin;
-            slab.ni = dr_imax - dr_imin + 1;
-                                      slab.nj = LAP;
-                                      slab.nk = dr_kmax - dr_kmin + 1;
-            break;
-        case 3: // j-max: 法向=j, 从 NJ-LAP-1 开始
-            slab.i0 = dr_imin;        slab.j0 = NJ - LAP - 1;
-                                      slab.k0 = dr_kmin;
-            slab.ni = dr_imax - dr_imin + 1;
-                                      slab.nj = LAP;
-                                      slab.nk = dr_kmax - dr_kmin + 1;
-            break;
-        case 4: // k-min: 法向=k, 从 interior layer 1 开始
-            slab.i0 = dr_imin;        slab.j0 = dr_jmin;  slab.k0 = 1;
-            slab.ni = dr_imax - dr_imin + 1;
-                                      slab.nj = dr_jmax - dr_jmin + 1;
-                                      slab.nk = LAP;
-            break;
-        case 5: // k-max: 法向=k, 从 NK-LAP-1 开始
-            slab.i0 = dr_imin;        slab.j0 = dr_jmin;
-            slab.k0 = NK - LAP - 1;
-            slab.ni = dr_imax - dr_imin + 1;
-                                      slab.nj = dr_jmax - dr_jmin + 1;
-                                      slab.nk = LAP;
-            break;
-        default:
-            return slab;
-        }
-
-        PetscInt total = slab.ni * slab.nj * slab.nk;
-        slab.x.resize((size_t)total);
-        slab.y.resize((size_t)total);
-        slab.z.resize((size_t)total);
-
-        PetscInt idx = 0;
-        for (PetscInt k = 0; k < slab.nk; ++k) {
-            PetscInt kg = slab.k0 + k;
-            for (PetscInt j = 0; j < slab.nj; ++j) {
-                PetscInt jg = slab.j0 + j;
-                for (PetscInt i = 0; i < slab.ni; ++i) {
-                    PetscInt ig = slab.i0 + i;
-                    if (ig < 0 || ig >= NI || jg < 0 || jg >= NJ || kg < 0 || kg >= NK) {
-                        slab.x[idx] = slab.y[idx] = slab.z[idx] = 0.0;
-                    } else {
-                        PetscInt gi = (kg * NJ + jg) * NI + ig;
-                        slab.x[idx] = coords.x[gi];
-                        slab.y[idx] = coords.y[gi];
-                        slab.z[idx] = coords.z[gi];
-                    }
-                    ++idx;
-                }
-            }
-        }
-        slab.valid = true;
-        return slab;
-    };
-
-    // ======== 世界广播 ========
-    PetscInt nConn = (PetscInt)face_connections_.size();
-    for (PetscInt ci = 0; ci < nConn; ++ci) {
-        auto& conn = face_connections_[ci];
-
-        // ── 方向1: block_a ← block_b ──
-        {
-            PetscMPIInt root = (PetscMPIInt)block_start_rank[conn.block_b];
-            PetscMPIInt dims[6];
-            PetscMPIInt total = 0;
-            std::vector<PetscReal> xb, yb, zb;
-
-            if (rank == root) {
-                DonorSlab s = packSlab((PetscInt)conn.block_b,
-                                       (PetscInt)conn.face_b,
-                                       conn.donorrange);
-                if (s.valid) {
-                    dims[0] = (PetscMPIInt)s.ni; dims[1] = (PetscMPIInt)s.nj;
-                    dims[2] = (PetscMPIInt)s.nk; dims[3] = (PetscMPIInt)s.i0;
-                    dims[4] = (PetscMPIInt)s.j0; dims[5] = (PetscMPIInt)s.k0;
-                    total   = (PetscMPIInt)(s.ni * s.nj * s.nk);
-                    xb = std::move(s.x);
-                    yb = std::move(s.y);
-                    zb = std::move(s.z);
-                }
-            }
-            MPI_Bcast(dims,  6, MPI_INT,    root, PETSC_COMM_WORLD);
-            MPI_Bcast(&total, 1, MPI_INT,    root, PETSC_COMM_WORLD);
-
-            // ★★★ 广播数据（之前缺失） ★★★
-            if (total > 0) {
-                if (rank != root) {
-                    xb.resize((size_t)total);
-                    yb.resize((size_t)total);
-                    zb.resize((size_t)total);
-                }
-                MPI_Bcast(xb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-                MPI_Bcast(yb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-                MPI_Bcast(zb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-            }
-
-            PetscMPIInt recv_root = (PetscMPIInt)block_start_rank[conn.block_a];
-            if (rank == recv_root) {
-                DonorSlab s;
-                s.ni = (PetscInt)dims[0]; s.nj = (PetscInt)dims[1];
-                s.nk = (PetscInt)dims[2]; s.i0 = (PetscInt)dims[3];
-                s.j0 = (PetscInt)dims[4]; s.k0 = (PetscInt)dims[5];
-                s.valid = true;
-                if (total > 0) {
-                    s.x = std::move(xb);
-                    s.y = std::move(yb);
-                    s.z = std::move(zb);
-                }
-                donor_slabs_[conn.block_a][conn.face_a] = std::move(s);
-            }
-        }
-
-        // ── 方向2: block_b ← block_a ──
-        {
-            PetscMPIInt root = (PetscMPIInt)block_start_rank[conn.block_a];
-            PetscMPIInt dims[6];
-            PetscMPIInt total = 0;
-            std::vector<PetscReal> xb, yb, zb;
-
-            if (rank == root) {
-                DonorSlab s = packSlab((PetscInt)conn.block_a,
-                                       (PetscInt)conn.face_a,
-                                       conn.pointrange);
-                if (s.valid) {
-                    dims[0] = (PetscMPIInt)s.ni; dims[1] = (PetscMPIInt)s.nj;
-                    dims[2] = (PetscMPIInt)s.nk; dims[3] = (PetscMPIInt)s.i0;
-                    dims[4] = (PetscMPIInt)s.j0; dims[5] = (PetscMPIInt)s.k0;
-                    total   = (PetscMPIInt)(s.ni * s.nj * s.nk);
-                    xb = std::move(s.x);
-                    yb = std::move(s.y);
-                    zb = std::move(s.z);
-                }
-            }
-            MPI_Bcast(dims,  6, MPI_INT,    root, PETSC_COMM_WORLD);
-            MPI_Bcast(&total, 1, MPI_INT,    root, PETSC_COMM_WORLD);
-
-            // ★★★ 广播数据（之前缺失） ★★★
-            if (total > 0) {
-                if (rank != root) {
-                    xb.resize((size_t)total);
-                    yb.resize((size_t)total);
-                    zb.resize((size_t)total);
-                }
-                MPI_Bcast(xb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-                MPI_Bcast(yb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-                MPI_Bcast(zb.data(), total, MPI_DOUBLE, root, PETSC_COMM_WORLD);
-            }
-
-            PetscMPIInt recv_root = (PetscMPIInt)block_start_rank[conn.block_b];
-            if (rank == recv_root) {
-                DonorSlab s;
-                s.ni = (PetscInt)dims[0]; s.nj = (PetscInt)dims[1];
-                s.nk = (PetscInt)dims[2]; s.i0 = (PetscInt)dims[3];
-                s.j0 = (PetscInt)dims[4]; s.k0 = (PetscInt)dims[5];
-                s.valid = true;
-                if (total > 0) {
-                    s.x = std::move(xb);
-                    s.y = std::move(yb);
-                    s.z = std::move(zb);
-                }
-                donor_slabs_[conn.block_b][conn.face_b] = std::move(s);
-            }
-        }
-    }
-
-    // ======== 各块内广播 ========
-    for (PetscInt b = 0; b < num_blocks; ++b) {
-        if ((PetscInt)my_block != b) continue;
-        MPI_Comm comm = block_comms_[b];
-        for (PetscMPIInt face = 0; face < 6; ++face) {
-            DonorSlab& slab = donor_slabs_[b][face];
-            PetscMPIInt vf = slab.valid ? 1 : 0;
-            MPI_Bcast(&vf, 1, MPI_INT, 0, comm);
-            slab.valid = (vf != 0);
-            if (!slab.valid) continue;
-
-            PetscMPIInt dims[6];
-            PetscMPIInt total;
-            if (rank == (PetscMPIInt)block_start_rank[b]) {
-                dims[0] = (PetscMPIInt)slab.ni; dims[1] = (PetscMPIInt)slab.nj;
-                dims[2] = (PetscMPIInt)slab.nk; dims[3] = (PetscMPIInt)slab.i0;
-                dims[4] = (PetscMPIInt)slab.j0; dims[5] = (PetscMPIInt)slab.k0;
-                total  = (PetscMPIInt)(slab.ni * slab.nj * slab.nk);
-            }
-            MPI_Bcast(dims, 6, MPI_INT, 0, comm);
-            MPI_Bcast(&total, 1, MPI_INT, 0, comm);
-
-            if (rank != (PetscMPIInt)block_start_rank[b]) {
-                slab.ni = dims[0]; slab.nj = dims[1]; slab.nk = dims[2];
-                slab.i0 = dims[3]; slab.j0 = dims[4]; slab.k0 = dims[5];
-                if (total > 0) {
-                    slab.x.resize((size_t)total);
-                    slab.y.resize((size_t)total);
-                    slab.z.resize((size_t)total);
-                }
-            }
-            if (total > 0) {
-                MPI_Bcast(slab.x.data(), total, MPI_DOUBLE, 0, comm);
-                MPI_Bcast(slab.y.data(), total, MPI_DOUBLE, 0, comm);
-                MPI_Bcast(slab.z.data(), total, MPI_DOUBLE, 0, comm);
-            }
-        }
-    }
-}
-// ====================================================================
-// getDonorSlab — 查询本地缓存的 donor slab
-// ====================================================================
-const DonorSlab* MultiBlockMesh::getDonorSlab(int block_id, int face) const
-{
-    if (block_id < 0 || block_id >= (int)donor_slabs_.size()) return nullptr;
-    if (face < 0 || face > 5) return nullptr;
-    if (!donor_slabs_[block_id][face].valid) return nullptr;
-    return &donor_slabs_[block_id][face];
-}
 

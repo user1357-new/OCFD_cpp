@@ -1,14 +1,48 @@
 # ============================================
-#  CFD 多块网格仿真配置
+#  CFD 多块网格仿真配置（完整版）
 # ============================================
 
-grid_format  = 2              # 0=Plot3D二进制, 1=Tecplot ASCII(默认)，2=CGNS（二进制 HDF5/ADF）
-grid_file    = 1test.cgns         # 后缀是什么都行，.x / .xyz / .grd / .bin 都可以
-scheme_vis   = CD8            # 差分格式：CD6 或 CD8
+grid_format  = 2                       # 0=Plot3D, 1=Tecplot, 2=CGNS
+grid_file    = 1test.cgns
 
-face_gtype   = 2              # 面 ghost 外推：1=一阶线性, 2=二阶镜像
-edge_gtype   = 2              # 边角 ghost 外推：1=一阶线性, 2=二阶镜像
-metric_gtype = 2              # 度量系数外推：1=一阶线性, 2=二阶镜像
+scheme_vis   = CD8                     # CD6 或 CD8
+metric_diff  = reduced                 # uniform 或 reduced
+lap          = 4                       # ghost 层数，CD8→4, CD6→3（可自动推导，也可手动写）
 
-# procs 自动分配（按网格点数比例 + 块内子域方正优化）分配cpu数量不要少于块数
-# 如需手动指定: procs = 2,2,1 | 2,1,1 | 2,1,1 | 2,2,1 | 2,1,1 | 2,1,1
+face_gtype   = 2                       # 面 ghost 外推：1=一阶线性, 2=二阶镜像
+edge_gtype   = 2                       # 边角 ghost 外推
+metric_gtype = 2                       # 度量系数 ghost 外推
+
+init_type    = dat             # farfield / sinusoidal / dat
+init_file  = restart.dat             # init_type=dat 时填文件路径
+#restart_file = restart.dat             # 运行结束默认输出二进制重启文件（格心守恒量）
+
+# k_x / k_y / k_z = 各方向正弦波数 (不写默认 1, 即一个完整周期)
+#k_x          = 2
+#k_y          = 2
+k_z          = 4
+
+mach         = 0.8
+gamma        = 1.4
+attack       = 2.0
+sideslip     = 0.0
+
+# Inlet BC 参数（超音速入口，5 守恒量 Dirichlet）
+inlet_rho    = 1.0
+inlet_u      = 0.8
+inlet_v      = 0.0
+inlet_w      = 0.0
+inlet_p      = 1.0
+
+# BC override（可选，不写则用 CGNS 默认值）
+# 格式: bc = block,face,type | block,face,type | ...
+# face: LEFT RIGHT BOTTOM TOP BACK FRONT
+# type: BCWall BCSymmetryPlane BCExtrapolate BCOutflow BCInflow BCInlet ...
+# bc = 0,LEFT,BCWall | 2,TOP,BCExtrapolate
+# ★ 同块周期性测试: block 0 BACK ↔ block 0 FRONT
+#    双方都写，成对校验。BACK/FRONT 均为 k-normal，切向 30×20 匹配
+#bc = 0,BACK,BCPeriodic:0,FRONT | 0,FRONT,BCPeriodic:0,BACK | 1,BACK,BCPeriodic:1,FRONT | 1,FRONT,BCPeriodic:1,BACK | 2,BACK,BCPeriodic:2,FRONT | 2,FRONT,BCPeriodic:2,BACK | 3,BACK,BCPeriodic:3,FRONT | 3,FRONT,BCPeriodic:3,BACK | 4,BACK,BCPeriodic:4,FRONT | 4,FRONT,BCPeriodic:4,BACK | 5,BACK,BCPeriodic:5,FRONT | 5,FRONT,BCPeriodic:5,BACK
+
+periodic_span = 0.0, 0.0, -3.0
+
+# procs 自动分配（不写 = auto）
