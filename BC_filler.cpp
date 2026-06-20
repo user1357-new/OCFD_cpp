@@ -370,6 +370,78 @@ void BCFarfieldFiller::fillGhostFace(Mesh* mesh, int face,
 }
 
 // ====================================================================
+// BCAcousticWallFiller — 声学硬壁面（滑移壁面）
+//
+// 用于线性化 Euler 方程扰动变量 U' = [ρ', ρ₀u', ρ₀v', ρ₀w', p']:
+//   - 法向速度奇延拓 → 壁面 u·n = 0
+//   - 切向速度偶延拓 → 滑移
+//   - 压力/密度偶延拓 → ∂p/∂n = ∂ρ/∂n = 0
+//
+// 速度反射公式：u_g = u_m - 2 (u_m · n) n
+// ====================================================================
+void BCAcousticWallFiller::fillGhostFace(Mesh* mesh, int face,
+                                          PetscReal*** u[5],
+                                          const DMDALocalInfo& info)
+{
+    PetscInt NX = mesh->getNxGlobal();
+    PetscInt NY = mesh->getNyGlobal();
+    PetscInt NZ = mesh->getNzGlobal();
+    PetscInt LAP = mesh->getLAP();
+
+    PetscReal n[3];
+    faceNormal(face, n);
+
+    int i0, i1, j0, j1, k0, k1;
+    ghostRange(face, LAP, NX, NY, NZ, info, i0, i1, j0, j1, k0, k1);
+
+    PetscReal inv_base_rho = 1.0 / base_rho_;
+
+    for (int k = k0; k <= k1; ++k) {
+        for (int j = j0; j <= j1; ++j) {
+            for (int i = i0; i <= i1; ++i) {
+                if (i >= 0 && i < NX && j >= 0 && j < NY && k >= 0 && k < NZ)
+                    continue;
+
+                // 二阶镜像：镜像 interior 索引
+                int im = i, jm = j, km = k;
+                if      (face == 0) im = -1 - i;
+                else if (face == 1) im = 2*(NX-1) - i;
+                else if (face == 2) jm = -1 - j;
+                else if (face == 3) jm = 2*(NY-1) - j;
+                else if (face == 4) km = -1 - k;
+                else if (face == 5) km = 2*(NZ-1) - k;
+
+                // 读取镜像点扰动守恒量 U' = [ρ', ρ₀u', ρ₀v', ρ₀w', p']
+                PetscReal rho_m = u[0][km][jm][im];
+                PetscReal u_m   = u[1][km][jm][im] * inv_base_rho;
+                PetscReal v_m   = u[2][km][jm][im] * inv_base_rho;
+                PetscReal w_m   = u[3][km][jm][im] * inv_base_rho;
+                PetscReal p_m   = u[4][km][jm][im];
+
+                // 法向速度分量
+                PetscReal vn_m = u_m * n[0] + v_m * n[1] + w_m * n[2];
+
+                // 反射法向分量，保留切向分量
+                PetscReal u_g = u_m - 2.0 * vn_m * n[0];
+                PetscReal v_g = v_m - 2.0 * vn_m * n[1];
+                PetscReal w_g = w_m - 2.0 * vn_m * n[2];
+
+                // 压力、密度偶延拓
+                PetscReal p_g   = p_m;
+                PetscReal rho_g = rho_m;
+
+                // 写回扰动守恒量
+                u[0][k][j][i] = rho_g;
+                u[1][k][j][i] = base_rho_ * u_g;
+                u[2][k][j][i] = base_rho_ * v_g;
+                u[3][k][j][i] = base_rho_ * w_g;
+                u[4][k][j][i] = p_g;
+            }
+        }
+    }
+}
+
+// ====================================================================
 // BCExtrapolateFiller — 零阶外推
 // ====================================================================
 void BCExtrapolateFiller::fillGhostFace(Mesh* mesh, int face,

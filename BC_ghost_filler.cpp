@@ -1394,7 +1394,7 @@ void MultiBlockMesh::exchangeDonorSlabsUPeriodic()
             if (rank == root) {
                 const auto& coords = full_coords_[conn.block_b];
                 if (coords.flow_ready) {
-                    const DonorSlab& ref = donor_slabs_[conn.block_a][conn.face_a];
+                    const DonorSlab& ref = donor_slabs_[conn.block_b][conn.face_b];
                     if (ref.valid) {
                         dims[0] = (PetscMPIInt)ref.ni; dims[1] = (PetscMPIInt)ref.nj;
                         dims[2] = (PetscMPIInt)ref.nk; dims[3] = (PetscMPIInt)ref.i0;
@@ -1447,7 +1447,7 @@ void MultiBlockMesh::exchangeDonorSlabsUPeriodic()
             if (rank == root) {
                 const auto& coords = full_coords_[conn.block_a];
                 if (coords.flow_ready) {
-                    const DonorSlab& ref = donor_slabs_[conn.block_b][conn.face_b];
+                    const DonorSlab& ref = donor_slabs_[conn.block_a][conn.face_a];
                     if (ref.valid) {
                         dims[0] = (PetscMPIInt)ref.ni; dims[1] = (PetscMPIInt)ref.nj;
                         dims[2] = (PetscMPIInt)ref.nk; dims[3] = (PetscMPIInt)ref.i0;
@@ -1654,7 +1654,7 @@ void MultiBlockMesh::exchangeDonorSlabsMetricsPeriodic()
             if (rank == root) {
                 const auto& coords = full_coords_[conn.block_b];
                 if (coords.metrics_ready) {
-                    const DonorSlab& ref = donor_slabs_[conn.block_a][conn.face_a];
+                    const DonorSlab& ref = donor_slabs_[conn.block_b][conn.face_b];
                     if (ref.valid) {
                         dims[0] = (PetscMPIInt)ref.ni; dims[1] = (PetscMPIInt)ref.nj;
                         dims[2] = (PetscMPIInt)ref.nk; dims[3] = (PetscMPIInt)ref.i0;
@@ -1705,7 +1705,7 @@ void MultiBlockMesh::exchangeDonorSlabsMetricsPeriodic()
             if (rank == root) {
                 const auto& coords = full_coords_[conn.block_a];
                 if (coords.metrics_ready) {
-                    const DonorSlab& ref = donor_slabs_[conn.block_b][conn.face_b];
+                    const DonorSlab& ref = donor_slabs_[conn.block_a][conn.face_a];
                     if (ref.valid) {
                         dims[0] = (PetscMPIInt)ref.ni; dims[1] = (PetscMPIInt)ref.nj;
                         dims[2] = (PetscMPIInt)ref.nk; dims[3] = (PetscMPIInt)ref.i0;

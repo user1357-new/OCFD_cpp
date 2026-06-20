@@ -71,6 +71,14 @@ void SimConfig::parse(const std::string &filename)
             periodic_pairs_ = parsePeriodicPairs(value);
         }
         else if (key == "procs")            procs_            = parseProcs(value);
+        else if (key == "base_rho")          base_rho_         = toReal(value);
+        else if (key == "base_p")            base_p_           = toReal(value);
+        else if (key == "amp")               amp_              = toReal(value);
+        else if (key == "spatial_derivative") spatial_derivative_ = value;
+        else if (key == "time_integrator")    time_integrator_   = value;
+        else if (key == "cfl")              cfl_              = toReal(value);
+        else if (key == "max_steps")        max_steps_        = toInt(value);
+        else if (key == "output_interval")  output_interval_  = toInt(value);
     }
 
     if (procs_.empty())
@@ -93,7 +101,20 @@ void SimConfig::applyDefaults()
     if (inlet_rho_ == 0.0) inlet_rho_ = 1.0;
     if (inlet_p_   == 0.0) inlet_p_   = 1.0;
 
+    // Linearized Euler base state 默认值
+    if (base_rho_ == 0.0) base_rho_ = 1.0;
+    if (base_p_   == 0.0) base_p_   = 1.0 / (gamma_ * mach_ * mach_);  // 从 Ma 反算
+    base_c0_ = std::sqrt(gamma_ * base_p_ / base_rho_);
+    if (amp_ == 0.0) amp_ = 1e-4;  // 线性声波小振幅
+
     // k_x/y/z 默认为 0 → sinusoidalInit 内自动按域尺寸算
+
+    // Solver 默认值
+    if (spatial_derivative_.empty()) spatial_derivative_  = "CD8";
+    if (time_integrator_.empty())    time_integrator_    = "RK3";
+    if (cfl_ == 0.0)                 cfl_                = 0.5;
+    if (max_steps_ == 0)            max_steps_          = 1000;
+    if (output_interval_ == 0)      output_interval_    = 100;
 
     // 将 periodic_span 填入每个 PeriodicPair
     for (auto& pp : periodic_pairs_) {
@@ -304,11 +325,21 @@ void SimConfig::print() const
         "  inlet_v       = %.4f\n"
         "  inlet_w       = %.4f\n"
         "  inlet_p       = %.4f\n"
+        "  base_rho      = %.6f\n"
+        "  base_p        = %.6f\n"
+        "  base_c0       = %.6f\n"
+        "  amp           = %.2e\n"
         "  k_x            = %.4f\n"
         "  k_y            = %.4f\n"
         "  k_z            = %.4f\n"
         "  periodic_span  = %.4f, %.4f, %.4f\n"
         "  procs (%d blocks) = %s\n"
+        "  --- Solver ---\n"
+        "  spatial_derivative = %s\n"
+        "  time_integrator    = %s\n"
+        "  cfl                = %.4f\n"
+        "  max_steps          = %d\n"
+        "  output_interval    = %d\n"
         "=============================\n",
         grid_file_.c_str(),
         (int)grid_format_, (grid_format_ == 0 ? "Plot3D" : (grid_format_ == 2 ? "CGNS" : "Tecplot")),
@@ -324,10 +355,16 @@ void SimConfig::print() const
         (double)mach_, (double)gamma_, (double)attack_, (double)sideslip_,
         (double)inlet_rho_, (double)inlet_u_, (double)inlet_v_,
         (double)inlet_w_, (double)inlet_p_,
+        (double)base_rho_, (double)base_p_, (double)base_c0_, (double)amp_,
         (double)k_x_, (double)k_y_, (double)k_z_,
         (double)periodic_span_[0], (double)periodic_span_[1], (double)periodic_span_[2],
         (int)(procs_auto_ ? 0 : procs_.size()),
-        procs_str.c_str());
+        procs_str.c_str(),
+        spatial_derivative_.c_str(),
+        time_integrator_.c_str(),
+        (double)cfl_,
+        (int)max_steps_,
+        (int)output_interval_);
 
     // BC overrides
     if (!bc_overrides_.empty()) {

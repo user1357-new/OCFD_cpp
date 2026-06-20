@@ -1,48 +1,86 @@
-# ============================================
-#  CFD 多块网格仿真配置（完整版）
-# ============================================
+# ============================================================
+#  CFD 多块网格仿真配置（完整版，所有可配参数 + 默认值说明）
+# ============================================================
+#  语法：key = value
+#  # 到行尾为注释，空行跳过
+#  未写的 key 使用下面的「默认值」
+# ============================================================
 
+# ---- 网格 ----
 grid_format  = 2                       # 0=Plot3D, 1=Tecplot, 2=CGNS
-grid_file    = 1test.cgns
+grid_file    = pipe1_1.cgns
 
-scheme_vis   = CD8                     # CD6 或 CD8
-metric_diff  = reduced                 # uniform 或 reduced
-lap          = 4                       # ghost 层数，CD8→4, CD6→3（可自动推导，也可手动写）
+# ---- 空间差分精度 ----
+#   scheme_vis 控制度量 Jacobian 差分阶数 + 自动推导 ghost 层数 lap
+#   spatial_derivative 控制通量导数差分阶数（二者通常设成一样）
+#   CD6 = 6 阶中心差分（lap 自动→3）   CD8 = 8 阶中心差分（lap 自动→4）
+scheme_vis            = CD8            # [必填] 度量差分阶数, CD6 / CD8
+spatial_derivative    = CD8            # [默认: CD8] 通量差分阶数, CD6 / CD8
 
-face_gtype   = 2                       # 面 ghost 外推：1=一阶线性, 2=二阶镜像
-edge_gtype   = 2                       # 边角 ghost 外推
-metric_gtype = 2                       # 度量系数 ghost 外推
+# ---- 时间积分精度 ----
+#   ForwardEuler = 1 阶前向 Euler
+#   RK3          = 3 阶 TVD RK（Shu-Osher）  ← 默认
+#   RK4          = 4 阶经典 RK
+#   RK5          = 5 阶段 4 阶低存储 RK（Carpenter-Kennedy）
+time_integrator       = RK3            # [默认: RK3]
 
-init_type    = dat             # farfield / sinusoidal / dat
-init_file  = restart.dat             # init_type=dat 时填文件路径
-#restart_file = restart.dat             # 运行结束默认输出二进制重启文件（格心守恒量）
+# ---- CFL 数与步数 ----
+cfl                   = 0.5            # [默认: 0.5]  时间步长 = CFL / max_eigenvalue
+max_steps             = 100           # [默认: 1000] 最大时间步数
+output_interval       = 100            # [默认: 100]  每隔多少步输出残差 + 写 Tecplot
 
-# k_x / k_y / k_z = 各方向正弦波数 (不写默认 1, 即一个完整周期)
-#k_x          = 2
-#k_y          = 2
-k_z          = 4
+# ---- ghost 层数与外推方式 ----
+#   lap 由 scheme_vis 自动推导（CD8→4, CD6→3），一般不用手动写
+face_gtype            = 2              # 面 ghost 外推: 1=一阶线性, 2=二阶镜像
+edge_gtype            = 2              # 边角 ghost 外推: 同上
+#   metric_gtype       = 2             # 度量系数 ghost 外推（默认=face_gtype）
+#   lap                = 4             # 手动覆盖 ghost 层数
 
-mach         = 0.8
+# ---- 度量差分方式 ----
+metric_diff            = reduced       # uniform（全均匀）/ reduced（边界降阶）
+
+# ---- 流动初始化 ----
+init_type    = acoustic                # [默认: farfield]
+                                       #   farfield   = 全场均匀来流
+                                       #   sinusoidal = 正弦扰动（线性 Euler）
+                                       #   acoustic   = 线性化平面波
+                                       #   dat        = 二进制重启文件
+
+# ---- 来流参数 ----
+#mach         = 0.8                     # 马赫数
+#gamma        = 1.4                     # 比热比
+#attack       = 2.0                     # 攻角 (°)
+#sideslip     = 0.0                     # 侧滑角 (°)
 gamma        = 1.4
-attack       = 2.0
-sideslip     = 0.0
+mach         = 0.001
+base_rho     = 1.0
+base_p       = 1.0
+amp          = 1e-6
+k_x          = 0.0
+k_y          = 0.0
+k_z          = 0.06283185307179587
 
-# Inlet BC 参数（超音速入口，5 守恒量 Dirichlet）
-inlet_rho    = 1.0
-inlet_u      = 0.8
-inlet_v      = 0.0
-inlet_w      = 0.0
-inlet_p      = 1.0
+# ---- 线性化 Euler 基底状态 (不写则自动从 Ma 反算) ----
+#   base_rho  = 1.0                    # 基底密度 [默认: 1.0]
+#   base_p    = 1.0/(gamma*Ma^2)       # 基底压力 [默认: 自动反算]
+#   base_c0   = sqrt(gamma*base_p/base_rho)  # 基底声速 [自动推导]
+#   amp       = 1e-4                   # 声波扰动振幅 [默认: 1e-4]
 
-# BC override（可选，不写则用 CGNS 默认值）
-# 格式: bc = block,face,type | block,face,type | ...
-# face: LEFT RIGHT BOTTOM TOP BACK FRONT
-# type: BCWall BCSymmetryPlane BCExtrapolate BCOutflow BCInflow BCInlet ...
-# bc = 0,LEFT,BCWall | 2,TOP,BCExtrapolate
-# ★ 同块周期性测试: block 0 BACK ↔ block 0 FRONT
-#    双方都写，成对校验。BACK/FRONT 均为 k-normal，切向 30×20 匹配
-#bc = 0,BACK,BCPeriodic:0,FRONT | 0,FRONT,BCPeriodic:0,BACK | 1,BACK,BCPeriodic:1,FRONT | 1,FRONT,BCPeriodic:1,BACK | 2,BACK,BCPeriodic:2,FRONT | 2,FRONT,BCPeriodic:2,BACK | 3,BACK,BCPeriodic:3,FRONT | 3,FRONT,BCPeriodic:3,BACK | 4,BACK,BCPeriodic:4,FRONT | 4,FRONT,BCPeriodic:4,BACK | 5,BACK,BCPeriodic:5,FRONT | 5,FRONT,BCPeriodic:5,BACK
 
-periodic_span = 0.0, 0.0, -3.0
+# ---- 正弦扰动波数 (仅 init_type=sinusoidal 时生效) ----
+#   k_x = 1                            # 不写默认按域尺寸自动算一个完整周期
+#   k_y = 1
+#   k_z = 1
 
-# procs 自动分配（不写 = auto）
+# ---- BC override（可选，覆盖 CGNS 默认 BC）----
+#   格式: bc = block,face,type | block,face,type | ...
+#   face: LEFT RIGHT BOTTOM TOP BACK FRONT
+#   type: BCWall BCAcousticWall BCInlet BCFarfield BCExtrapolate
+# ---- BC override ----
+bc = 0,BACK,BCPeriodic:0,FRONT | 0,FRONT,BCPeriodic:0,BACK | 0,LEFT,BCAcousticWall | 0,RIGHT,BCAcousticWall | 0,BOTTOM,BCAcousticWall | 0,TOP,BCAcousticWall
+
+periodic_span = 0.0, 0.0, 100.0
+
+# ---- 并行进程分配（不写 = 自动）----
+#   格式: procs = nx,ny,nz | nx,ny,nz | ...
+#   每块一行，用 | 分隔。nx*ny*nz = 该块使用的 MPI 进程数

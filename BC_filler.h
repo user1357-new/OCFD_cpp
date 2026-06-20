@@ -122,6 +122,30 @@ private:
 };
 
 // ====================================================================
+// BCAcousticWallFiller — 声学硬壁面（滑移壁面）
+//
+// 用于线性化 Euler 方程的声学计算：
+//   - 法向速度奇延拓 → 壁面处 u·n = 0
+//   - 切向速度偶延拓 → 允许滑移
+//   - 压力/密度偶延拓 → ∂p/∂n = ∂ρ/∂n = 0（绝热/等熵）
+//
+// 使用二阶镜像填充：U_ghost = U_boundary ± (U_boundary - U_mirror)
+//   (+ 偶延拓, - 奇延拓)
+// ====================================================================
+class BCAcousticWallFiller : public BCFaceFiller {
+public:
+    BCAcousticWallFiller(PetscReal gamma, PetscReal base_rho)
+        : gamma_(gamma), base_rho_(base_rho) {}
+    const char* name() const override { return "BCAcousticWall"; }
+    void fillGhostFace(Mesh* mesh, int face,
+                       PetscReal*** u[5],
+                       const DMDALocalInfo& info) override;
+private:
+    PetscReal gamma_;
+    PetscReal base_rho_;   // 基态密度，用于从 U'[1..3] 恢复速度
+};
+
+// ====================================================================
 // BCExtrapolateFiller — 零阶外推 (回退用)
 // ====================================================================
 class BCExtrapolateFiller : public BCFaceFiller {

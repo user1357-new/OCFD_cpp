@@ -272,6 +272,105 @@ static PetscErrorCode datInit(MultiBlockMesh& multiMesh, const std::string& file
 }
 
 // ====================================================================
+// acousticInit — 纯声学平面波初始条件（线性化 Euler，静止基底）
+//
+// 扰动变量 U' = [ρ', ρ₀u', ρ₀v', ρ₀w', p']
+// 仅激发声学模态：∇×u'=0, p'=c₀²ρ'
+//
+// 平面波 p'(x) = A * sin(k·x),  u' = (k/|k|) * A/(ρ₀c₀) * sin(k·x)
+// ====================================================================
+static PetscErrorCode acousticInit(MultiBlockMesh& multiMesh, const SimConfig& cfg)
+{
+    PetscReal gamma    = cfg.getGamma();
+    PetscReal base_rho = cfg.getBaseRho();
+    PetscReal base_p   = cfg.getBaseP();
+    PetscReal c0       = cfg.getBaseC0();
+    PetscReal amp      = cfg.getAmp();        // 声波振幅 A
+
+    PetscReal kx = cfg.getKx();
+    PetscReal ky = cfg.getKy();
+    PetscReal kz = cfg.getKz();
+    if (kx == 0.0 && ky == 0.0 && kz == 0.0) {
+        kx = 1.0; ky = 0.0; kz = 0.0;  // 默认沿 x 方向
+    }
+
+    PetscReal k_mag = std::sqrt(kx*kx + ky*ky + kz*kz);
+    PetscReal kx_n = kx / k_mag;   // 单位波矢方向
+    PetscReal ky_n = ky / k_mag;
+    PetscReal kz_n = kz / k_mag;
+    PetscReal vel_amp = amp / (base_rho * c0);  // 速度振幅 A/(ρ₀c₀)
+
+    PetscInt numBlocks = multiMesh.getNumBlocks();
+    PetscErrorCode ierr;
+
+    for (PetscInt b = 0; b < numBlocks; ++b) {
+        Mesh* blk = multiMesh.getBlock(b);
+        if (!blk) continue;
+
+        DM da_c = blk->getDM();
+        DMDALocalInfo info;
+        ierr = DMDAGetLocalInfo(da_c, &info); CHKERRQ(ierr);
+
+        PetscInt xs = info.xs, ys = info.ys, zs = info.zs;
+        PetscInt xm = info.xm, ym = info.ym, zm = info.zm;
+
+        // 获取格心坐标
+        PetscReal ***cx, ***cy, ***cz;
+        ierr = blk->getCellCoordinateArrays(cx, cy, cz, info); CHKERRQ(ierr);
+
+        PetscReal*** u[5];
+        ierr = DMDAVecGetArray(da_c, blk->getURef(0), &u[0]); CHKERRQ(ierr);
+        ierr = DMDAVecGetArray(da_c, blk->getURef(1), &u[1]); CHKERRQ(ierr);
+        ierr = DMDAVecGetArray(da_c, blk->getURef(2), &u[2]); CHKERRQ(ierr);
+        ierr = DMDAVecGetArray(da_c, blk->getURef(3), &u[3]); CHKERRQ(ierr);
+        ierr = DMDAVecGetArray(da_c, blk->getURef(4), &u[4]); CHKERRQ(ierr);
+
+        for (PetscInt k = zs; k < zs + zm; ++k) {
+            for (PetscInt j = ys; j < ys + ym; ++j) {
+                for (PetscInt i = xs; i < xs + xm; ++i) {
+                    PetscReal xx = cx[k][j][i];
+                    PetscReal yy = cy[k][j][i];
+                    PetscReal zz = cz[k][j][i];
+                    PetscReal phase = kx * xx + ky * yy + kz * zz;
+
+                    PetscReal cosine = std::cos(phase);
+
+                    PetscReal p_prime = amp * cosine;                   // p'
+                    PetscReal rho_prime = p_prime / (c0 * c0);          // ρ' (等熵)
+                    PetscReal vel = vel_amp * cosine;                   // 速度大小 |u'|
+
+                    u[0][k][j][i] = rho_prime;               // ρ'
+                    u[1][k][j][i] = base_rho * vel * kx_n;   // ρ₀u'
+                    u[2][k][j][i] = base_rho * vel * ky_n;   // ρ₀v'
+                    u[3][k][j][i] = base_rho * vel * kz_n;   // ρ₀w'
+                    u[4][k][j][i] = p_prime;                 // p'
+                }
+            }
+        }
+
+        ierr = DMDAVecRestoreArray(da_c, blk->getURef(0), &u[0]); CHKERRQ(ierr);
+        ierr = DMDAVecRestoreArray(da_c, blk->getURef(1), &u[1]); CHKERRQ(ierr);
+        ierr = DMDAVecRestoreArray(da_c, blk->getURef(2), &u[2]); CHKERRQ(ierr);
+        ierr = DMDAVecRestoreArray(da_c, blk->getURef(3), &u[3]); CHKERRQ(ierr);
+        ierr = DMDAVecRestoreArray(da_c, blk->getURef(4), &u[4]); CHKERRQ(ierr);
+
+        ierr = blk->restoreCellCoordinateArrays(cx, cy, cz); CHKERRQ(ierr);
+        ierr = blk->syncUGlobalToLocal(); CHKERRQ(ierr);
+    }
+
+    PetscPrintf(PETSC_COMM_WORLD,
+        "[acousticInit] pure acoustic plane wave\n"
+        "  k=(%.3f, %.3f, %.3f)  |k|=%.3f  n=(%.3f, %.3f, %.3f)\n"
+        "  rho0=%.6f  p0=%.6f  c0=%.6f  amp=%.2e  vel_amp=%.2e\n",
+        (double)kx, (double)ky, (double)kz, (double)k_mag,
+        (double)kx_n, (double)ky_n, (double)kz_n,
+        (double)base_rho, (double)base_p, (double)c0,
+        (double)amp, (double)vel_amp);
+
+    return 0;
+}
+
+// ====================================================================
 // initializeFlowField — 统一入口
 // ====================================================================
 PetscErrorCode initializeFlowField(MultiBlockMesh& mesh, const SimConfig& cfg)
@@ -281,11 +380,14 @@ PetscErrorCode initializeFlowField(MultiBlockMesh& mesh, const SimConfig& cfg)
         return farfieldInit(mesh, cfg);
     else if (itype == "sinusoidal")
         return sinusoidalInit(mesh, cfg);
+    else if (itype == "acoustic")
+        return acousticInit(mesh, cfg);
     else if (itype == "dat")
         return datInit(mesh, cfg.getInitFile());
     else {
         PetscPrintf(PETSC_COMM_WORLD,
-            "[init] ERROR: unknown init_type '%s' (expect farfield or dat)\n", itype.c_str());
+            "[init] ERROR: unknown init_type '%s' (expect farfield, sinusoidal, acoustic, or dat)\n",
+            itype.c_str());
         return 1;
     }
 }

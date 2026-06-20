@@ -1909,11 +1909,9 @@ void MultiBlockMesh::ExportAllCellFlowToTecplot(const std::string &filename)
             for (int c = 0; c < 5; ++c)
                 DMDAVecGetArray(blk->getDM(), uVecs[c], &u[c]);
 
-            for (PetscInt k = info.gzs; k < info.gzs + info.gzm; ++k)
-                for (PetscInt j = info.gys; j < info.gys + info.gym; ++j)
-                    for (PetscInt i = info.gxs; i < info.gxs + info.gxm; ++i) {
-                        if (i < 0 || i >= nxc || j < 0 || j >= nyc || k < 0 || k >= nzc)
-                            continue;  // 只取物理格心
+            for (PetscInt k = info.zs; k < info.zs + info.zm; ++k)
+                for (PetscInt j = info.ys; j < info.ys + info.ym; ++j)
+                    for (PetscInt i = info.xs; i < info.xs + info.xm; ++i) {
                         PetscInt idx = (k * nyc + j) * nxc + i;
                         PetscInt off = idx * 8;
                         cell_data[off+0] = axx[k][j][i];

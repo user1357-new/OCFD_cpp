@@ -13,7 +13,8 @@ CXXFLAGS = -std=c++17 -O2 $(PETSC_CCPPFLAGS) $(CGNS_INC)
 
 TARGET = main
 SRCS = main.cpp mesh_resource.cpp mesh_IO.cpp mesh_jacobi.cpp \
-       mesh_ghost.cpp BC_ghost_filler.cpp BC_filler.cpp sim_config.cpp flow_init.cpp
+       mesh_ghost.cpp BC_ghost_filler.cpp BC_filler.cpp sim_config.cpp flow_init.cpp \
+       flux_derivative.cpp solver.cpp time_integrator.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)
@@ -21,7 +22,8 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(PETSC_LIB) $(CGNS_LIB)
 
-%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h BC_filler.h sim_config.h flow_init.h
+%.o: %.cpp mesh.h mesh_mutiblock.h BC_ghost_filler.h BC_filler.h sim_config.h flow_init.h \
+       flux_scheme.h flux_derivative.h solver.h time_integrator.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: $(TARGET)

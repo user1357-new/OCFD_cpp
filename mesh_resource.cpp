@@ -243,6 +243,22 @@ PetscErrorCode Mesh::syncUGlobalToLocal()
 }
 
 // ====================================================================
+// syncULocalToGlobal — 把 U_local 推回 U_global（solver 每步后调用）
+// ====================================================================
+PetscErrorCode Mesh::syncULocalToGlobal()
+{
+    PetscErrorCode ierr;
+    if (!cell_pool_initialized) {
+        ierr = ensureCellLocalVectors(); CHKERRQ(ierr);
+    }
+    for (int i = 0; i < 5; ++i) {
+        ierr = DMLocalToGlobalBegin(da, U_local[i], INSERT_VALUES, U[i]); CHKERRQ(ierr);
+        ierr = DMLocalToGlobalEnd(da, U_local[i], INSERT_VALUES, U[i]); CHKERRQ(ierr);
+    }
+    return 0;
+}
+
+// ====================================================================
 // getLocalCoordinateVecs
 // ====================================================================
 std::vector<Vec> Mesh::getLocalCoordinateVecs() const

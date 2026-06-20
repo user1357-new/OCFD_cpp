@@ -69,31 +69,44 @@ public:
     const std::vector<PeriodicPair>& getPeriodicPairs() const { return periodic_pairs_; }
     const PetscReal* getPeriodicSpan() const { return periodic_span_; }
 
+    // Linearized Euler base state
+    PetscReal          getBaseRho()            const { return base_rho_; }
+    PetscReal          getBaseP()              const { return base_p_; }
+    PetscReal          getBaseC0()             const { return base_c0_; }
+    PetscReal          getAmp()                const { return amp_; }
+
+    // Solver
+    const std::string& getSpatialDerivative()  const { return spatial_derivative_; }
+    const std::string& getTimeIntegrator()     const { return time_integrator_; }
+    PetscReal          getCFL()                const { return cfl_; }
+    PetscInt           getMaxSteps()           const { return max_steps_; }
+    PetscInt           getOutputInterval()     const { return output_interval_; }
+
     void print() const;
 
 private:
-    PetscInt    grid_format_;
+    PetscInt    grid_format_     = 0;
     std::string grid_file_;
-    PetscInt    scheme_vis_;
-    PetscInt    LAP_;
-    PetscInt    face_gtype_;
-    PetscInt    edge_gtype_;
-    PetscInt    metric_gtype_;
-    PetscInt    metric_diff_type_;
+    PetscInt    scheme_vis_      = 0;
+    PetscInt    LAP_             = 0;
+    PetscInt    face_gtype_      = 0;
+    PetscInt    edge_gtype_      = 0;
+    PetscInt    metric_gtype_    = 0;
+    PetscInt    metric_diff_type_= 0;
     std::string init_type_;
     std::string init_file_;
     std::string restart_file_;
-    PetscReal   mach_;
-    PetscReal   gamma_;
-    PetscReal   attack_;
-    PetscReal   sideslip_;
+    PetscReal   mach_            = 0.0;
+    PetscReal   gamma_           = 0.0;
+    PetscReal   attack_          = 0.0;
+    PetscReal   sideslip_        = 0.0;
 
     // Inlet BC
-    PetscReal   inlet_rho_;
-    PetscReal   inlet_u_;
-    PetscReal   inlet_v_;
-    PetscReal   inlet_w_;
-    PetscReal   inlet_p_;
+    PetscReal   inlet_rho_       = 0.0;
+    PetscReal   inlet_u_         = 0.0;
+    PetscReal   inlet_v_         = 0.0;
+    PetscReal   inlet_w_         = 0.0;
+    PetscReal   inlet_p_         = 0.0;
 
     // Sinusoidal init
     PetscReal   k_x_ = 0.0;
@@ -101,12 +114,25 @@ private:
     PetscReal   k_z_ = 0.0;
 
     std::vector<std::array<PetscInt,3>> procs_;
-    bool procs_auto_;
+    bool procs_auto_ = false;
 
     // BC override
     std::vector<BCOverride> bc_overrides_;
     std::vector<PeriodicPair> periodic_pairs_;
     PetscReal periodic_span_[3] = {0,0,0};
+
+    // Linearized Euler base state
+    PetscReal   base_rho_         = 0.0;
+    PetscReal   base_p_           = 0.0;
+    PetscReal   base_c0_          = 0.0;   // derived: sqrt(gamma * base_p / base_rho)
+    PetscReal   amp_              = 0.0;
+
+    // Solver
+    std::string spatial_derivative_;
+    std::string time_integrator_;
+    PetscReal   cfl_              = 0.0;
+    PetscInt    max_steps_        = 0;
+    PetscInt    output_interval_  = 0;
 
     void parse(const std::string &filename);
     void applyDefaults();

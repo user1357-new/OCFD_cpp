@@ -99,6 +99,7 @@ public:
     PetscErrorCode getLocalUArrays(PetscReal*** u[5], DMDALocalInfo &info);
     PetscErrorCode restoreLocalUArrays(PetscReal*** u[5]);
     PetscErrorCode syncUGlobalToLocal();
+    PetscErrorCode syncULocalToGlobal();
     Vec getU(int comp) const;
     Vec& getURef(int comp);
 
